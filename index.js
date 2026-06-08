@@ -174,12 +174,152 @@ function calTitle(t) {
     .replace(/\s+/g,' ').trim() || t.trim()
 }
 
-function smartParse(text) {
+// ── LLM-классификатор (Groq, бесплатный) ─────────────────────────────────────
+// Понимает свободный текст без ключевых слов. При отсутствии ключа/ошибке
+// падаем обратно на классификацию по правилам (smartParseRules).
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY || ''
+const GROQ_MODEL   = process.env.GROQ_MODEL   || 'llama-3.1-8b-instant'
+const CLASSIFY_TYPES = ['task', 'budget', 'calendar', 'diary', 'note']
+
+function groqRequest(body) {
+  return new Promise((resolve, reject) => {
+    const data = JSON.stringify(body)
+    const req  = https.request({
+      hostname: 'api.groq.com',
+      path:     '/openai/v1/chat/completions',
+      method:   'POST',
+      headers:  { 'Content-Type':'application/json', 'Authorization':`Bearer ${GROQ_API_KEY}`, 'Content-Length': Buffer.byteLength(data) },
+      timeout:  15000,
+    }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())) } catch (e) { reject(e) } })
+    })
+    req.on('error',   reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
+    req.write(data)
+    req.end()
+  })
+}
+
+function classifyPrompt(text) {
+  return `Ты — классификатор сообщений для личного планировщика «Flow». Определи категорию сообщения пользователя (на русском языке) и извлеки данные. Отвечай СТРОГО одним JSON-объектом, без markdown и пояснений.
+
+Категории и формат ответа:
+• task — дело/действие, которое нужно сделать:
+  {"type":"task","text":"переформулированный текст задачи кратко","tag":"Учёба|Работа|Здоровье|Финансы|Личное|Проект","priority":"low|medium|high"}
+• budget — трата или поступление денег (в сообщении есть конкретная сумма):
+  {"type":"budget","amount":число,"isIncome":true|false,"category":"Еда|Транспорт|Развлечения|Здоровье|Одежда|Доходы|Связь|Жильё|Кредиты|Образование|Прочее","note":"краткое описание операции"}
+• calendar — запланированное событие/встреча/визит/звонок на конкретную дату или время:
+  {"type":"calendar","title":"короткое название события без даты и времени"}
+• diary — личная запись о прожитом дне, впечатления, эмоции, рефлексия о себе:
+  {"type":"diary"}
+• note — идея, мысль, что-то на заметку для памяти (не дело и не дневник):
+  {"type":"note","title":"короткий заголовок","tag":"Идея|Работа|Учёба|Личное"}
+
+Правила выбора при неоднозначности:
+- Названа конкретная сумма денег ("150 рублей", "потратил 500", "получил зарплату") → budget.
+- Упомянута встреча/визит/созвон/мероприятие с датой или временем → calendar.
+- Рассказ о прошедшем/проживаемом дне, своих действиях или чувствах в прошедшем времени → diary.
+- Короткая мысль/идея «на подумать» → note.
+- Во всех остальных случаях, если это что-то, что нужно сделать → task.
+
+Сообщение пользователя:
+"${text}"
+
+Ответ — только JSON одной строкой, без пояснений и markdown.`
+}
+
+async function classifyLLM(text) {
+  if (!GROQ_API_KEY) return null
+  try {
+    const res = await groqRequest({
+      model: GROQ_MODEL,
+      messages: [{ role: 'user', content: classifyPrompt(text) }],
+      temperature: 0,
+      max_tokens: 250,
+      response_format: { type: 'json_object' },
+    })
+    const content = res?.choices?.[0]?.message?.content
+    if (!content) return null
+    const parsed = JSON.parse(content)
+    if (!CLASSIFY_TYPES.includes(parsed.type)) return null
+    return parsed
+  } catch (e) {
+    console.log('[llm:classify]', e.message)
+    return null
+  }
+}
+
+// ── Основная функция: сначала LLM, при неудаче — классификация по правилам ──
+
+async function smartParse(text) {
   const t     = text.trim()
   const lower = t.toLowerCase()
   const today = todayKey()
   const now   = new Date()
+  const llm   = await classifyLLM(t)
 
+  if (llm?.type === 'calendar') {
+    const date  = parseDate(t) || today
+    const time  = parseTime(t) || ''
+    const title = (llm.title || calTitle(t)).trim() || t
+    return {
+      type: 'calendar',
+      data: { id:`tg_${Date.now()}`, title, date, time, endTime:'', color:'#5b8dee', allDay:!time, desc:'', location:'', repeat:'none', repeatEnd:'' },
+      reply: `📅 *Событие добавлено*\n«${title}»\n📆 ${date}${time?' в '+time:''}`,
+    }
+  }
+  if (llm?.type === 'budget') {
+    const numMatch = t.match(/\d[\d\s,.]*/)
+    const amount   = typeof llm.amount === 'number' && llm.amount > 0
+      ? llm.amount
+      : (numMatch ? parseFloat(numMatch[0].replace(/\s/g,'').replace(',','.')) : 0)
+    const isIncome = !!llm.isIncome
+    const category = llm.category || budgetCategory(lower)
+    const note     = llm.note || t
+    return {
+      type: 'budget',
+      data: { id:`tg_${Date.now()}`, type:isIncome?'income':'expense', amount, category, note, date:today, month:today.slice(0,7), created:now.toISOString() },
+      reply: `💰 *${isIncome?'Доход':'Расход'} ${amount.toLocaleString('ru')} ₽*\nКатегория: ${category}${note&&note!==t?'\nЗаметка: '+note:''}`,
+    }
+  }
+  if (llm?.type === 'diary') {
+    return {
+      type: 'diary',
+      data: { id:`tg_${Date.now()}`, date:today, body:t, mood:null, created:now.toISOString(), updated:now.toISOString() },
+      reply: `📖 *Запись в дневник*\n«${t.slice(0,100)}${t.length>100?'…':''}»`,
+    }
+  }
+  if (llm?.type === 'note') {
+    const title = (llm.title || t.split('\n')[0]).slice(0, 60) || 'Без заголовка'
+    const tag   = llm.tag || 'Личное'
+    return {
+      type: 'note',
+      data: { id:`tg_${Date.now()}`, title, body:t, color:'#1e2433', tag, pinned:false, created:now.toISOString(), updated:now.toISOString() },
+      reply: `📝 *Заметка сохранена*\n«${title}»`,
+    }
+  }
+  if (llm?.type === 'task') {
+    const cleanText = llm.text || t
+    const tag       = llm.tag || taskTag(lower)
+    const priority  = llm.priority || (/срочно|важно|критично|asap|горит|немедленно/.test(lower) ? 'high' : 'medium')
+    const taskDate  = parseDate(t) || today
+    return {
+      type: 'task',
+      data: { id:`tg_${Date.now()}`, text:cleanText, tag, priority, date:taskDate, done:false, created:now.toISOString(), subtasks:[] },
+      reply: `${tagEmoji(tag)} *Задача [${tag}]* добавлена:\n«${cleanText}»`,
+    }
+  }
+
+  // LLM недоступен или вернул некорректный результат — классификация по правилам
+  return smartParseRules(t, lower, today, now)
+}
+
+// ── Классификация по правилам (фолбэк, если LLM недоступен) ──────────────────
+
+function smartParseRules(t, lower, today, now) {
   if (isCalendar(t, lower)) {
     const date  = parseDate(t) || today
     const time  = parseTime(t) || ''
@@ -279,11 +419,14 @@ async function handleCmd(text) {
     '⏱ /focus   — статистика фокуса\n' +
     '💰 /budget  — бюджет месяца\n' +
     '📊 /summary — сводка дня\n\n' +
-    '✨ *Умный ввод* — просто напиши текстом:\n' +
+    '✨ *Умный ввод* — просто напиши текстом своими словами,\n' +
+    'бот сам поймёт, куда это записать:\n' +
     '• `изучить React` → задача [Учёба]\n' +
     '• `кофе 150₽` → расход в бюджет\n' +
     '• `получил 5000₽` → доход в бюджет\n' +
-    '• `идея: название` → заметка\n' +
+    '• `встреча с врачом завтра в 15:00` → событие\n' +
+    '• `сегодня погулял в парке, было классно` → дневник\n' +
+    '• `идея для подарка маме` → заметка\n' +
     '• `купить молоко` → задача [Личное]'
 
   try {
@@ -309,10 +452,10 @@ async function handleCmd(text) {
     else if (cmd === '/add') {
       const input = args || ''
       if (!input) { await tgSend('❌ Укажи текст: /add Купить хлеб'); return }
-      await applyParsed(smartParse(input))
+      await applyParsed(await smartParse(input))
     }
     else if (!text.startsWith('/')) {
-      await applyParsed(smartParse(text))
+      await applyParsed(await smartParse(text))
     }
     else await tgSend('❓ Неизвестная команда. Напиши /help')
   } catch (e) {

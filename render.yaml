@@ -12,6 +12,8 @@ services:
         sync: false
       - key: SYNC_KEY
         sync: false
+      - key: GROQ_API_KEY
+        sync: false
       - key: MORNING_TIME
         value: "09:00"
       - key: EVENING_TIME
