@@ -17,6 +17,92 @@ if (!TOKEN || !CHAT_ID) {
 // ── In-memory store (данные синхронизируются из Electron) ────────────────────
 let store = {}
 
+// Очередь элементов, добавленных через бот пока приложение было закрыто
+let pendingItems = []
+
+// ── Умный парсинг входящих сообщений ─────────────────────────────────────────
+
+function tagEmoji(tag) {
+  const map = { 'Учёба':'📚', 'Работа':'💼', 'Здоровье':'💪', 'Финансы':'💰', 'Личное':'🏠', 'Проект':'🎯' }
+  return map[tag] || '📌'
+}
+
+function detectCategory(lower) {
+  if (/еда|кафе|ресторан|кофе|обед|ужин|завтрак|продукты|пицца|доставк|суши|фастфуд/.test(lower)) return 'Еда'
+  if (/такси|метро|автобус|транспорт|бензин|парковк|uber|каршер|электричк/.test(lower)) return 'Транспорт'
+  if (/кино|игры|развлечен|подписк|netflix|spotify|стриминг|концерт|театр/.test(lower)) return 'Развлечения'
+  if (/врач|аптек|здоровь|лекарств|анализ|клиник|стоматол/.test(lower)) return 'Здоровье'
+  if (/одежд|обувь|шопинг/.test(lower)) return 'Одежда'
+  if (/зарплат|фриланс|доход|заработ|гонорар|выплат/.test(lower)) return 'Доходы'
+  if (/связь|интернет|мобильн/.test(lower)) return 'Связь'
+  if (/аренд|квартир|комуналк|жкх/.test(lower)) return 'Жильё'
+  return 'Прочее'
+}
+
+function detectTaskTag(lower) {
+  if (/изучи|выучи|прочитать|разобраться|туториал|лекц|книга|учёба|учиться|пройти курс/.test(lower)) return 'Учёба'
+  if (/работ|проект|написать|отправить|подготовить|отчёт|презентаци|митинг|созвон/.test(lower)) return 'Работа'
+  if (/зал|тренировк|врач|таблетк|здоровь|диета|бегать|спорт|упражнен|пробежк/.test(lower)) return 'Здоровье'
+  if (/купить(?! курс| книг)|оплатить|счёт|финанс|банк/.test(lower)) return 'Финансы'
+  return 'Личное'
+}
+
+function smartParse(text) {
+  const t     = text.trim()
+  const lower = t.toLowerCase()
+  const today = todayKey()
+
+  // Бюджет: есть сумма + валюта
+  const moneyMatch = t.match(/(\d[\d\s,.]*)\s*(?:₽|р(?:уб(?:лей|ля|\.)?)?(?:\b|$))/i)
+  if (moneyMatch) {
+    const amount   = parseFloat(moneyMatch[1].replace(/[\s]/g, '').replace(',', '.'))
+    const isIncome = /получил|зарплат|доход|заработал|выплат|пришло|перевод/i.test(lower)
+    const note     = t.replace(moneyMatch[0], '').replace(/^\s*[-—:,]\s*/, '').trim() || t
+    const category = detectCategory(lower)
+    return {
+      type: 'budget',
+      data: {
+        id: `tg_${Date.now()}`, type: isIncome ? 'income' : 'expense',
+        amount, category, note, date: today, month: today.slice(0, 7),
+        created: new Date().toISOString(),
+      },
+      reply: `💰 *${isIncome ? 'Доход' : 'Расход'} ${amount.toLocaleString('ru')} ₽* добавлен\nКатегория: ${category}\nЗаметка: ${note}`,
+    }
+  }
+
+  // Заметка: начинается с ключевого слова
+  if (/^(?:идея|заметка|мысль|запиши?|записать)[:\s]/i.test(t)) {
+    const body  = t.replace(/^(?:идея|заметка|мысль|запиши?|записать)[:\s]*/i, '').trim()
+    const title = body.split('\n')[0].slice(0, 60) || 'Без заголовка'
+    const tag   = /идея/i.test(t) ? 'Идея' : /работ/i.test(lower) ? 'Работа' : /учёб|учи/i.test(lower) ? 'Учёба' : 'Личное'
+    return {
+      type: 'note',
+      data: {
+        id: `tg_${Date.now()}`, title, body, color: '#1e2433',
+        tag, pinned: false,
+        created: new Date().toISOString(), updated: new Date().toISOString(),
+      },
+      reply: `📝 *Заметка сохранена*\n«${title}»`,
+    }
+  }
+
+  // Задача: всё остальное
+  const tag      = detectTaskTag(lower)
+  const priority = /срочно|важно|критично|asap/i.test(lower) ? 'high' : 'medium'
+  const cleanText = t
+    .replace(/^(?:изучить?|прочитать?|посмотреть?|сделать?|добавить?|напомнить?|купить?)\s+/i, '')
+    .replace(/\s+(?:срочно|важно)$/i, '')
+    .trim() || t
+  return {
+    type: 'task',
+    data: {
+      id: `tg_${Date.now()}`, text: cleanText, tag, priority,
+      date: today, done: false, created: new Date().toISOString(), subtasks: [],
+    },
+    reply: `${tagEmoji(tag)} *Задача [${tag}]* добавлена:\n«${cleanText}»`,
+  }
+}
+
 // ── Утилиты ──────────────────────────────────────────────────────────────────
 const todayKey = () => new Date().toISOString().slice(0, 10)
 const monthKey = () => new Date().toISOString().slice(0, 7)
@@ -151,13 +237,18 @@ async function handleCmd(text) {
   const args  = parts.slice(1).join(' ').trim()
 
   const HELP = '👋 *Flow — твой личный планировщик*\n\n' +
-    '/tasks   — задачи на сегодня\n' +
-    '/all     — все незавершённые задачи\n' +
-    '/habits  — привычки сегодня\n' +
-    '/focus   — статистика фокуса\n' +
-    '/budget  — бюджет месяца\n' +
-    '/summary — сводка дня\n' +
-    '/add [текст] — добавить задачу'
+    '📋 /tasks   — задачи на сегодня\n' +
+    '📌 /all     — все незавершённые задачи\n' +
+    '🔁 /habits  — привычки сегодня\n' +
+    '⏱ /focus   — статистика фокуса\n' +
+    '💰 /budget  — бюджет месяца\n' +
+    '📊 /summary — сводка дня\n\n' +
+    '✨ *Умный ввод* — просто напиши текстом:\n' +
+    '• `изучить React` → задача [Учёба]\n' +
+    '• `кофе 150₽` → расход в бюджет\n' +
+    '• `получил 5000₽` → доход в бюджет\n' +
+    '• `идея: название` → заметка\n' +
+    '• `купить молоко` → задача [Личное]'
 
   try {
     if      (cmd === '/start' || cmd === '/help') await tgSend(HELP)
@@ -180,13 +271,38 @@ async function handleCmd(text) {
       await tgSend(lines.join('\n'))
     }
     else if (cmd === '/add') {
-      if (!args) { await tgSend('❌ Укажи текст: /add Купить хлеб'); return }
-      if (!store.tasks) store.tasks = []
-      store.tasks.push({
-        id: `tg_${Date.now()}`, text: args, tag: 'other', priority: 'medium',
-        date: todayKey(), done: false, created: new Date().toISOString(), subtasks: [],
-      })
-      await tgSend(`✅ Задача добавлена: «${args}»`)
+      // /add работает как умный парсинг с аргументом
+      const input = args || ''
+      if (!input) { await tgSend('❌ Укажи текст: /add Купить хлеб'); return }
+      const parsed = smartParse(input)
+      if (parsed.type === 'task') {
+        if (!store.tasks) store.tasks = []
+        store.tasks.push(parsed.data)
+      } else if (parsed.type === 'note') {
+        if (!store.notes) store.notes = []
+        store.notes.push(parsed.data)
+      } else if (parsed.type === 'budget') {
+        if (!store.budget_txns) store.budget_txns = []
+        store.budget_txns.push(parsed.data)
+      }
+      pendingItems.push({ type: parsed.type, data: parsed.data })
+      await tgSend(parsed.reply)
+    }
+    else if (!text.startsWith('/')) {
+      // Свободный текст → умный парсинг
+      const parsed = smartParse(text)
+      if (parsed.type === 'task') {
+        if (!store.tasks) store.tasks = []
+        store.tasks.push(parsed.data)
+      } else if (parsed.type === 'note') {
+        if (!store.notes) store.notes = []
+        store.notes.push(parsed.data)
+      } else if (parsed.type === 'budget') {
+        if (!store.budget_txns) store.budget_txns = []
+        store.budget_txns.push(parsed.data)
+      }
+      pendingItems.push({ type: parsed.type, data: parsed.data })
+      await tgSend(parsed.reply)
     }
     else await tgSend('❓ Неизвестная команда. Напиши /help')
   } catch (e) {
@@ -259,9 +375,30 @@ app.use(express.json({ limit: '10mb' }))
 
 app.post('/sync', (req, res) => {
   if (req.headers['x-sync-key'] !== SYNC_KEY) return res.status(401).json({ error: 'Unauthorized' })
-  store = { ...store, ...req.body }
+  const incoming = req.body
+
+  // Мёрджим элементы из очереди которые Electron ещё не забрал через /pending
+  if (pendingItems.length) {
+    const pending = pendingItems.splice(0)
+    for (const item of pending) {
+      if (item.type === 'task')   incoming.tasks      = [...(incoming.tasks      || []), item.data]
+      if (item.type === 'note')   incoming.notes      = [...(incoming.notes      || []), item.data]
+      if (item.type === 'budget') incoming.budget_txns = [...(incoming.budget_txns || []), item.data]
+    }
+    console.log(`[flow-bot] merged ${pending.length} pending items`)
+  }
+
+  store = { ...store, ...incoming }
   console.log(`[flow-bot] sync: tasks=${(store.tasks||[]).length}`)
   res.json({ ok: true })
+})
+
+// Electron забирает очередь накопленных элементов (добавленных пока приложение было закрыто)
+app.get('/pending', (req, res) => {
+  if (req.headers['x-sync-key'] !== SYNC_KEY) return res.status(401).json({ error: 'Unauthorized' })
+  const items = pendingItems.splice(0)
+  console.log(`[flow-bot] /pending → отдано ${items.length} элементов`)
+  res.json({ items })
 })
 
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }))
