@@ -47,58 +47,133 @@ function detectTaskTag(lower) {
   return 'Личное'
 }
 
+function parseRuDate(text) {
+  const lower = text.toLowerCase()
+  const now   = new Date()
+  const pad   = n => String(n).padStart(2, '0')
+  const fmt   = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
+  if (/\bсегодня\b/.test(lower)) return fmt(now)
+  const tom = new Date(now); tom.setDate(tom.getDate()+1)
+  if (/\bзавтра\b/.test(lower)) return fmt(tom)
+  const dtom = new Date(now); dtom.setDate(dtom.getDate()+2)
+  if (/\bпослезавтра\b/.test(lower)) return fmt(dtom)
+  const dows = [['воскресен',0],['понедельник',1],['вторник',2],['среду',3],['среда',3],['четверг',4],['пятниц',5],['суббот',6]]
+  for (const [name, dow] of dows) {
+    if (lower.includes(name)) {
+      const d = new Date(now); d.setDate(d.getDate() + ((dow - d.getDay() + 7) % 7 || 7)); return fmt(d)
+    }
+  }
+  const months = [['январ',0],['феврал',1],['март',2],['апрел',3],['мая',4],['май',4],['июн',5],['июл',6],['август',7],['сентябр',8],['октябр',9],['ноябр',10],['декабр',11]]
+  const dm = lower.match(/(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?/)
+  if (dm) {
+    const me = months.find(([k]) => dm[2].startsWith(k))
+    if (me) {
+      const year = dm[3] ? parseInt(dm[3]) : now.getFullYear()
+      const d = new Date(year, me[1], parseInt(dm[1]))
+      if (d < now && !dm[3]) d.setFullYear(d.getFullYear()+1)
+      return fmt(d)
+    }
+  }
+  return null
+}
+
+function parseRuTime(text) {
+  const m = text.match(/\b(\d{1,2}):(\d{2})\b/)
+  if (m) return `${m[1].padStart(2,'0')}:${m[2]}`
+  const m2 = text.match(/в\s+(\d{1,2})\s*(?:утра|часов?|дня|вечера|ночи)/i)
+  if (m2) {
+    let h = parseInt(m2[1])
+    if (/вечера|ночи/.test(text) && h < 12) h += 12
+    else if (/дня/.test(text) && h < 12 && h >= 1) h += 12
+    return `${String(h).padStart(2,'0')}:00`
+  }
+  return null
+}
+
+function isCalendar(t, lower) {
+  const hasTime     = /\b\d{1,2}:\d{2}\b/.test(t) || /в\s+\d{1,2}\s*(?:утра|часов?|дня|вечера|ночи)/i.test(t)
+  const hasDate     = /\b(завтра|послезавтра|сегодня|понедельник|вторник|среду?|четверг|пятниц[уа]|суббот[уа]|воскресенье|\d{1,2}\s+[а-яё]{3,})/i.test(lower)
+  const hasEventWrd = /\b(запись|встреча|встречу|встретиться|созвон|звонок|митинг|собрание|мероприятие|событие|визит|приём|прием|конференция|вечеринк|концерт|спектакль|экзамен|защита|дедлайн|поездка|рейс|вылет|прилёт|прилет|день\s*рожден)\b/i.test(lower)
+  return hasEventWrd && (hasDate || hasTime) || (hasTime && hasDate)
+}
+
+function isDiary(t, lower) {
+  if (/^(?:сегодня|вчера)\s+я\b/i.test(t)) return true
+  if (/^сегодня\s+(?:был[аи]?|ходил[а]?|гулял[а]?|посетил[а]?|поел[а]?|провел[а]?)/i.test(t)) return true
+  if (/\bя\s+(?:погулял|погуляла|сходил|сходила|посетил|посетила|побывал|побывала|провел|провела|встретил|встретила|поговорил|поговорила|поел|поела|выспался|выспалась|отдохнул|отдохнула|поработал|поработала|почитал|почитала|посмотрел|посмотрела|написал|написала)\b/i.test(lower)) return true
+  if (/\b(?:настроение сегодня|чувствую себя|был[а]? продуктивн|хороший день|плохой день|устал[а]?$|неплохой день|день прошёл|день прошел)\b/i.test(lower)) return true
+  return false
+}
+
+function cleanCalendarTitle(t) {
+  return t
+    .replace(/\b\d{1,2}:\d{2}\b/g, '')
+    .replace(/\b\d{1,2}\s+[а-яёА-ЯЁ]{3,}(?:\s+\d{4})?\b/g, '')
+    .replace(/\b(?:сегодня|завтра|послезавтра)\b/gi, '')
+    .replace(/\bв\s+(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье)\b/gi, '')
+    .replace(/\s+/g, ' ').trim() || t.trim()
+}
+
 function smartParse(text) {
   const t     = text.trim()
   const lower = t.toLowerCase()
   const today = todayKey()
+  const now   = new Date()
 
-  // Бюджет: есть сумма + валюта
-  const moneyMatch = t.match(/(\d[\d\s,.]*)\s*(?:₽|р(?:уб(?:лей|ля|\.)?)?(?:\b|$))/i)
-  if (moneyMatch) {
-    const amount   = parseFloat(moneyMatch[1].replace(/[\s]/g, '').replace(',', '.'))
-    const isIncome = /получил|зарплат|доход|заработал|выплат|пришло|перевод/i.test(lower)
-    const note     = t.replace(moneyMatch[0], '').replace(/^\s*[-—:,]\s*/, '').trim() || t
-    const category = detectCategory(lower)
+  // ── 1. Календарь ──────────────────────────────────────────────────────────
+  if (isCalendar(t, lower)) {
+    const date  = parseRuDate(t) || today
+    const time  = parseRuTime(t) || ''
+    const title = cleanCalendarTitle(t)
     return {
-      type: 'budget',
-      data: {
-        id: `tg_${Date.now()}`, type: isIncome ? 'income' : 'expense',
-        amount, category, note, date: today, month: today.slice(0, 7),
-        created: new Date().toISOString(),
-      },
-      reply: `💰 *${isIncome ? 'Доход' : 'Расход'} ${amount.toLocaleString('ru')} ₽* добавлен\nКатегория: ${category}\nЗаметка: ${note}`,
+      type: 'calendar',
+      data: { id:`tg_${Date.now()}`, title, date, time, endTime:'', color:'#5b8dee', allDay:!time, desc:'', location:'', repeat:'none', repeatEnd:'' },
+      reply: `📅 *Событие добавлено*\n«${title}»\n📆 ${date}${time?' в '+time:''}`,
     }
   }
 
-  // Заметка: начинается с ключевого слова
+  // ── 2. Бюджет ─────────────────────────────────────────────────────────────
+  const moneyMatch = t.match(/(\d[\d\s,.]*)\s*(?:₽|р(?:уб(?:лей|ля|\.)?)?(?:\b|$))/i)
+  if (moneyMatch) {
+    const amount   = parseFloat(moneyMatch[1].replace(/\s/g,'').replace(',','.'))
+    const isIncome = /получил|зарплат|доход|заработал|выплат|пришло|перевод/i.test(lower)
+    const note     = t.replace(moneyMatch[0],'').replace(/^\s*[-—:,]\s*/,'').trim() || t
+    const category = detectCategory(lower)
+    return {
+      type: 'budget',
+      data: { id:`tg_${Date.now()}`, type:isIncome?'income':'expense', amount, category, note, date:today, month:today.slice(0,7), created:now.toISOString() },
+      reply: `💰 *${isIncome?'Доход':'Расход'} ${amount.toLocaleString('ru')} ₽*\nКатегория: ${category}\nЗаметка: ${note}`,
+    }
+  }
+
+  // ── 3. Дневник ────────────────────────────────────────────────────────────
+  if (isDiary(t, lower)) {
+    return {
+      type: 'diary',
+      data: { id:`tg_${Date.now()}`, date:today, body:t, mood:null, created:now.toISOString(), updated:now.toISOString() },
+      reply: `📖 *Запись в дневник*\n«${t.slice(0,80)}${t.length>80?'…':''}»`,
+    }
+  }
+
+  // ── 4. Заметка ────────────────────────────────────────────────────────────
   if (/^(?:идея|заметка|мысль|запиши?|записать)[:\s]/i.test(t)) {
-    const body  = t.replace(/^(?:идея|заметка|мысль|запиши?|записать)[:\s]*/i, '').trim()
-    const title = body.split('\n')[0].slice(0, 60) || 'Без заголовка'
-    const tag   = /идея/i.test(t) ? 'Идея' : /работ/i.test(lower) ? 'Работа' : /учёб|учи/i.test(lower) ? 'Учёба' : 'Личное'
+    const body  = t.replace(/^(?:идея|заметка|мысль|запиши?|записать)[:\s]*/i,'').trim()
+    const title = body.split('\n')[0].slice(0,60) || 'Без заголовка'
+    const tag   = /идея/i.test(t)?'Идея':/работ/i.test(lower)?'Работа':/учёб|учи/i.test(lower)?'Учёба':'Личное'
     return {
       type: 'note',
-      data: {
-        id: `tg_${Date.now()}`, title, body, color: '#1e2433',
-        tag, pinned: false,
-        created: new Date().toISOString(), updated: new Date().toISOString(),
-      },
+      data: { id:`tg_${Date.now()}`, title, body, color:'#1e2433', tag, pinned:false, created:now.toISOString(), updated:now.toISOString() },
       reply: `📝 *Заметка сохранена*\n«${title}»`,
     }
   }
 
-  // Задача: всё остальное
+  // ── 5. Задача ─────────────────────────────────────────────────────────────
   const tag      = detectTaskTag(lower)
   const priority = /срочно|важно|критично|asap/i.test(lower) ? 'high' : 'medium'
-  const cleanText = t
-    .replace(/^(?:изучить?|прочитать?|посмотреть?|сделать?|добавить?|напомнить?|купить?)\s+/i, '')
-    .replace(/\s+(?:срочно|важно)$/i, '')
-    .trim() || t
+  const cleanText = t.replace(/^(?:изучить?|прочитать?|посмотреть?|сделать?|добавить?|напомнить?|купить?)\s+/i,'').replace(/\s+(?:срочно|важно)$/i,'').trim() || t
   return {
     type: 'task',
-    data: {
-      id: `tg_${Date.now()}`, text: cleanText, tag, priority,
-      date: today, done: false, created: new Date().toISOString(), subtasks: [],
-    },
+    data: { id:`tg_${Date.now()}`, text:cleanText, tag, priority, date:today, done:false, created:now.toISOString(), subtasks:[] },
     reply: `${tagEmoji(tag)} *Задача [${tag}]* добавлена:\n«${cleanText}»`,
   }
 }
@@ -229,6 +304,32 @@ function fmtSummary(prefix = '') {
   return lines.join('\n')
 }
 
+// ── Применить результат парсинга к store + pendingItems ──────────────────────
+
+async function applyParsed(parsed) {
+  const { type, data, reply } = parsed
+  if (type === 'task') {
+    if (!store.tasks) store.tasks = []
+    store.tasks.push(data)
+  } else if (type === 'note') {
+    if (!store.notes) store.notes = []
+    store.notes.push(data)
+  } else if (type === 'budget') {
+    if (!store.budget_txns) store.budget_txns = []
+    store.budget_txns.push(data)
+  } else if (type === 'calendar') {
+    if (!store.calendar_events) store.calendar_events = []
+    store.calendar_events.push(data)
+  } else if (type === 'diary') {
+    if (!store.diary_entries) store.diary_entries = []
+    const ex = store.diary_entries.find(e => e.date === data.date)
+    if (ex) { ex.body += '\n\n' + data.body; ex.updated = data.updated }
+    else store.diary_entries.push(data)
+  }
+  pendingItems.push({ type, data })
+  await tgSend(reply)
+}
+
 // ── Обработка команд ─────────────────────────────────────────────────────────
 
 async function handleCmd(text) {
@@ -271,38 +372,12 @@ async function handleCmd(text) {
       await tgSend(lines.join('\n'))
     }
     else if (cmd === '/add') {
-      // /add работает как умный парсинг с аргументом
       const input = args || ''
       if (!input) { await tgSend('❌ Укажи текст: /add Купить хлеб'); return }
-      const parsed = smartParse(input)
-      if (parsed.type === 'task') {
-        if (!store.tasks) store.tasks = []
-        store.tasks.push(parsed.data)
-      } else if (parsed.type === 'note') {
-        if (!store.notes) store.notes = []
-        store.notes.push(parsed.data)
-      } else if (parsed.type === 'budget') {
-        if (!store.budget_txns) store.budget_txns = []
-        store.budget_txns.push(parsed.data)
-      }
-      pendingItems.push({ type: parsed.type, data: parsed.data })
-      await tgSend(parsed.reply)
+      await applyParsed(smartParse(input))
     }
     else if (!text.startsWith('/')) {
-      // Свободный текст → умный парсинг
-      const parsed = smartParse(text)
-      if (parsed.type === 'task') {
-        if (!store.tasks) store.tasks = []
-        store.tasks.push(parsed.data)
-      } else if (parsed.type === 'note') {
-        if (!store.notes) store.notes = []
-        store.notes.push(parsed.data)
-      } else if (parsed.type === 'budget') {
-        if (!store.budget_txns) store.budget_txns = []
-        store.budget_txns.push(parsed.data)
-      }
-      pendingItems.push({ type: parsed.type, data: parsed.data })
-      await tgSend(parsed.reply)
+      await applyParsed(smartParse(text))
     }
     else await tgSend('❓ Неизвестная команда. Напиши /help')
   } catch (e) {
@@ -381,9 +456,17 @@ app.post('/sync', (req, res) => {
   if (pendingItems.length) {
     const pending = pendingItems.splice(0)
     for (const item of pending) {
-      if (item.type === 'task')   incoming.tasks      = [...(incoming.tasks      || []), item.data]
-      if (item.type === 'note')   incoming.notes      = [...(incoming.notes      || []), item.data]
-      if (item.type === 'budget') incoming.budget_txns = [...(incoming.budget_txns || []), item.data]
+      if (item.type === 'task')     incoming.tasks           = [...(incoming.tasks           || []), item.data]
+      if (item.type === 'note')     incoming.notes           = [...(incoming.notes           || []), item.data]
+      if (item.type === 'budget')   incoming.budget_txns     = [...(incoming.budget_txns     || []), item.data]
+      if (item.type === 'calendar') incoming.calendar_events = [...(incoming.calendar_events || []), item.data]
+      if (item.type === 'diary') {
+        const entries = incoming.diary_entries || []
+        const ex = entries.find(e => e.date === item.data.date)
+        if (ex) { ex.body += '\n\n' + item.data.body; ex.updated = item.data.updated }
+        else entries.push(item.data)
+        incoming.diary_entries = entries
+      }
     }
     console.log(`[flow-bot] merged ${pending.length} pending items`)
   }
