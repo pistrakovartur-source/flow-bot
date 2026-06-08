@@ -1,0 +1,15 @@
+{
+  "name": "flow-bot-server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "https-proxy-agent": "^9.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

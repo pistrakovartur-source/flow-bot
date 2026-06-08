@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: flow-bot
+    runtime: node
+    buildCommand: npm install
+    startCommand: node index.js
+    plan: free
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: CHAT_ID
+        sync: false
+      - key: SYNC_KEY
+        sync: false
+      - key: MORNING_TIME
+        value: "09:00"
+      - key: EVENING_TIME
+        value: "20:00"
+      - key: PORT
+        value: "10000"
