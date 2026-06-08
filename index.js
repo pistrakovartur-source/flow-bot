@@ -20,98 +20,158 @@ let store = {}
 // Очередь элементов, добавленных через бот пока приложение было закрыто
 let pendingItems = []
 
-// ── Умный парсинг входящих сообщений ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// УМНЫЙ ПАРСЕР (bot-server) — без \b для кириллицы
+// ══════════════════════════════════════════════════════════════════════════════
 
 function tagEmoji(tag) {
-  const map = { 'Учёба':'📚', 'Работа':'💼', 'Здоровье':'💪', 'Финансы':'💰', 'Личное':'🏠', 'Проект':'🎯' }
+  const map = { 'Учёба':'📚','Работа':'💼','Здоровье':'💪','Финансы':'💰','Личное':'🏠','Проект':'🎯' }
   return map[tag] || '📌'
 }
 
-function detectCategory(lower) {
-  if (/еда|кафе|ресторан|кофе|обед|ужин|завтрак|продукты|пицца|доставк|суши|фастфуд/.test(lower)) return 'Еда'
-  if (/такси|метро|автобус|транспорт|бензин|парковк|uber|каршер|электричк/.test(lower)) return 'Транспорт'
-  if (/кино|игры|развлечен|подписк|netflix|spotify|стриминг|концерт|театр/.test(lower)) return 'Развлечения'
-  if (/врач|аптек|здоровь|лекарств|анализ|клиник|стоматол/.test(lower)) return 'Здоровье'
-  if (/одежд|обувь|шопинг/.test(lower)) return 'Одежда'
-  if (/зарплат|фриланс|доход|заработ|гонорар|выплат/.test(lower)) return 'Доходы'
-  if (/связь|интернет|мобильн/.test(lower)) return 'Связь'
-  if (/аренд|квартир|комуналк|жкх/.test(lower)) return 'Жильё'
+function budgetCategory(lower) {
+  if (/еда|кафе|ресторан|кофе|обед|ужин|завтрак|продукт|пицца|доставк|суши|фастфуд|хлеб|молок|пельмен|шаурм|бургер|роллы/.test(lower)) return 'Еда'
+  if (/такси|метро|автобус|транспорт|бензин|парковк|uber|каршер|электричк|самокат|проезд|маршрутк/.test(lower)) return 'Транспорт'
+  if (/кино|игры|развлечен|подписк|netflix|spotify|стриминг|концерт|театр|кальян|боулинг/.test(lower)) return 'Развлечения'
+  if (/врач|аптек|здоровь|лекарств|анализ|клиник|стоматол|больниц|таблетк|процедур/.test(lower)) return 'Здоровье'
+  if (/одежд|обувь|шопинг|штаны|куртка|пальто|футболк|носк|джинс/.test(lower)) return 'Одежда'
+  if (/зарплат|фриланс|доход|заработ|гонорар|выплат|аванс|премия|перевод/.test(lower)) return 'Доходы'
+  if (/связь|интернет|мобильн|телефон|оператор/.test(lower)) return 'Связь'
+  if (/аренд|квартир|комуналк|жкх|электричеств/.test(lower)) return 'Жильё'
+  if (/кредит|ипотек|долг|займ/.test(lower)) return 'Кредиты'
+  if (/курс|книг|образован|обучени/.test(lower)) return 'Образование'
   return 'Прочее'
 }
 
-function detectTaskTag(lower) {
-  if (/изучи|выучи|прочитать|разобраться|туториал|лекц|книга|учёба|учиться|пройти курс/.test(lower)) return 'Учёба'
-  if (/работ|проект|написать|отправить|подготовить|отчёт|презентаци|митинг|созвон/.test(lower)) return 'Работа'
-  if (/зал|тренировк|врач|таблетк|здоровь|диета|бегать|спорт|упражнен|пробежк/.test(lower)) return 'Здоровье'
-  if (/купить(?! курс| книг)|оплатить|счёт|финанс|банк/.test(lower)) return 'Финансы'
+function taskTag(lower) {
+  if (/изучи|выучи|прочитать|разобраться|туториал|лекц|учёба|учиться|пройти курс|книга по/.test(lower)) return 'Учёба'
+  if (/работ|проект|написать|отправить|подготовить|отчёт|презентаци|митинг|созвон|деплой|код/.test(lower)) return 'Работа'
+  if (/зал|тренировк|врач|таблетк|здоровь|диета|бегать|спорт|упражнен|пробежк|питани|калори/.test(lower)) return 'Здоровье'
+  if (/купить(?! курс| книг| урок)|оплатить|счёт|финанс|банк/.test(lower)) return 'Финансы'
   return 'Личное'
 }
 
-function parseRuDate(text) {
+function pad2(n) { return String(n).padStart(2,'0') }
+
+function parseDate(text) {
   const lower = text.toLowerCase()
   const now   = new Date()
-  const pad   = n => String(n).padStart(2, '0')
-  const fmt   = d => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`
-  if (/\bсегодня\b/.test(lower)) return fmt(now)
-  const tom = new Date(now); tom.setDate(tom.getDate()+1)
-  if (/\bзавтра\b/.test(lower)) return fmt(tom)
-  const dtom = new Date(now); dtom.setDate(dtom.getDate()+2)
-  if (/\bпослезавтра\b/.test(lower)) return fmt(dtom)
-  const dows = [['воскресен',0],['понедельник',1],['вторник',2],['среду',3],['среда',3],['четверг',4],['пятниц',5],['суббот',6]]
-  for (const [name, dow] of dows) {
+  const fmt   = d => `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`
+  const shift = days => { const d=new Date(now); d.setDate(d.getDate()+days); return d }
+
+  if (/сегодня/.test(lower))     return fmt(now)
+  if (/послезавтра/.test(lower)) return fmt(shift(2))
+  if (/завтра/.test(lower))      return fmt(shift(1))
+
+  let m
+  m = lower.match(/через\s+(\d+)\s+дн[еёяий]/)
+  if (m) return fmt(shift(+m[1]))
+  m = lower.match(/через\s+(\d+)\s+недел[иью]/)
+  if (m) return fmt(shift(+m[1]*7))
+  m = lower.match(/через\s+(\d+)\s+месяц[ае]?/)
+  if (m) { const d=new Date(now); d.setMonth(d.getMonth()+parseInt(m[1])); return fmt(d) }
+  if (/через\s+неделю/.test(lower))  return fmt(shift(7))
+  if (/через\s+месяц/.test(lower))   { const d=new Date(now); d.setMonth(d.getMonth()+1); return fmt(d) }
+  if (/следующ[уюий]+\s+недел|на\s+следующей\s+неделе/.test(lower)) return fmt(shift(7))
+
+  const isNext = /следующ[уюий]/.test(lower)
+  const dowMap = [['воскресень',0],['понедельник',1],['вторник',2],['среду',3],['среда',3],['четверг',4],['пятниц',5],['суббот',6]]
+  for (const [name,dow] of dowMap) {
     if (lower.includes(name)) {
-      const d = new Date(now); d.setDate(d.getDate() + ((dow - d.getDay() + 7) % 7 || 7)); return fmt(d)
+      let diff = (dow - now.getDay() + 7) % 7 || 7
+      if (isNext) diff += 7
+      return fmt(shift(diff))
     }
   }
+
+  const numDate = text.match(/\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b/)
+  if (numDate) {
+    const dy=parseInt(numDate[1]), mo=parseInt(numDate[2])-1
+    let yr = numDate[3] ? parseInt(numDate[3]) : now.getFullYear()
+    if (yr<100) yr+=2000
+    if (mo>=0&&mo<=11&&dy>=1&&dy<=31) {
+      const d=new Date(yr,mo,dy)
+      if (d<now&&!numDate[3]) d.setFullYear(d.getFullYear()+1)
+      return fmt(d)
+    }
+  }
+
   const months = [['январ',0],['феврал',1],['март',2],['апрел',3],['мая',4],['май',4],['июн',5],['июл',6],['август',7],['сентябр',8],['октябр',9],['ноябр',10],['декабр',11]]
-  const dm = lower.match(/(\d{1,2})\s+([а-яё]+)(?:\s+(\d{4}))?/)
-  if (dm) {
-    const me = months.find(([k]) => dm[2].startsWith(k))
+  const ruDate = lower.match(/(\d{1,2})(?:-?го)?\s+([а-яё]+)(?:\s+(\d{4}))?/)
+  if (ruDate) {
+    const me = months.find(([k]) => ruDate[2].startsWith(k))
     if (me) {
-      const year = dm[3] ? parseInt(dm[3]) : now.getFullYear()
-      const d = new Date(year, me[1], parseInt(dm[1]))
-      if (d < now && !dm[3]) d.setFullYear(d.getFullYear()+1)
+      const yr = ruDate[3] ? parseInt(ruDate[3]) : now.getFullYear()
+      const d  = new Date(yr, me[1], parseInt(ruDate[1]))
+      if (d<now&&!ruDate[3]) d.setFullYear(d.getFullYear()+1)
       return fmt(d)
     }
   }
   return null
 }
 
-function parseRuTime(text) {
-  const m = text.match(/\b(\d{1,2}):(\d{2})\b/)
-  if (m) return `${m[1].padStart(2,'0')}:${m[2]}`
-  const m2 = text.match(/в\s+(\d{1,2})\s*(?:утра|часов?|дня|вечера|ночи)/i)
+function parseTime(text) {
+  const lower = text.toLowerCase()
+  if (/полдень/.test(lower))  return '12:00'
+  if (/полночь/.test(lower))  return '00:00'
+  const m1 = text.match(/\b(\d{1,2}):(\d{2})\b/)
+  if (m1) { const h=+m1[1],mn=+m1[2]; if(h<=23&&mn<=59) return `${pad2(h)}:${pad2(mn)}` }
+  const m2 = lower.match(/в\s+(\d{1,2})(?:\s+(?:час[ао]в?|ч))?\s*(утра|дня|вечера|ночи)?(?=\s|$)/)
   if (m2) {
-    let h = parseInt(m2[1])
-    if (/вечера|ночи/.test(text) && h < 12) h += 12
-    else if (/дня/.test(text) && h < 12 && h >= 1) h += 12
-    return `${String(h).padStart(2,'0')}:00`
+    let h=parseInt(m2[1]); const p=m2[2]||''
+    if (p==='вечера'&&h<12)          h+=12
+    else if (p==='ночи'&&h>=6&&h<12) h+=12
+    else if (p==='дня'&&h<12&&h>=1)  h+=12
+    if (h<=23) return `${pad2(h)}:00`
   }
+  if (/утром/.test(lower)   && !/(?:вчера|сегодня)\s+утром/.test(lower))   return '09:00'
+  if (/днём|днем/.test(lower))                                               return '13:00'
+  if (/вечером/.test(lower) && !/(?:вчера|сегодня)\s+вечером/.test(lower)) return '19:00'
+  if (/ночью/.test(lower))                                                   return '22:00'
   return null
 }
 
-function isCalendar(t, lower) {
-  const hasTime     = /\b\d{1,2}:\d{2}\b/.test(t) || /в\s+\d{1,2}\s*(?:утра|часов?|дня|вечера|ночи)/i.test(t)
-  const hasDate     = /\b(завтра|послезавтра|сегодня|понедельник|вторник|среду?|четверг|пятниц[уа]|суббот[уа]|воскресенье|\d{1,2}\s+[а-яё]{3,})/i.test(lower)
-  const hasEventWrd = /\b(запись|встреча|встречу|встретиться|созвон|звонок|митинг|собрание|мероприятие|событие|визит|приём|прием|конференция|вечеринк|концерт|спектакль|экзамен|защита|дедлайн|поездка|рейс|вылет|прилёт|прилет|день\s*рожден)\b/i.test(lower)
-  return hasEventWrd && (hasDate || hasTime) || (hasTime && hasDate)
-}
-
-function isDiary(t, lower) {
-  if (/^(?:сегодня|вчера)\s+я\b/i.test(t)) return true
-  if (/^сегодня\s+(?:был[аи]?|ходил[а]?|гулял[а]?|посетил[а]?|поел[а]?|провел[а]?)/i.test(t)) return true
-  if (/\bя\s+(?:погулял|погуляла|сходил|сходила|посетил|посетила|побывал|побывала|провел|провела|встретил|встретила|поговорил|поговорила|поел|поела|выспался|выспалась|отдохнул|отдохнула|поработал|поработала|почитал|почитала|посмотрел|посмотрела|написал|написала)\b/i.test(lower)) return true
-  if (/\b(?:настроение сегодня|чувствую себя|был[а]? продуктивн|хороший день|плохой день|устал[а]?$|неплохой день|день прошёл|день прошел)\b/i.test(lower)) return true
+function isBudget(t, lower) {
+  if (/\d+\s*₽/.test(t)) return true
+  if (/\d+\s*руб/.test(lower)) return true
+  if (/руб\w*\s*\d+/.test(lower)) return true
+  if (/(?:потратил[а]?|стоит|стоил[а]?|обошлось|заплатил[а]?|оплатил[а]?)\s+\d/.test(lower)) return true
   return false
 }
 
-function cleanCalendarTitle(t) {
+function isCalendar(t, lower) {
+  const hasTime = parseTime(t) !== null
+  const hasDate = parseDate(t) !== null
+  const hasEvt  = /запись|записался|записалась|встреча|встречу|встретиться|созвон|созвониться|звонок|митинг|собрание|мероприятие|событие|визит|приём|прием|конференция|вечеринк|концерт|спектакль|экзамен|зачёт|зачет|защита|дедлайн|поездка|рейс|вылет|прилёт|прилет|день рожден|праздник|юбилей|свидание|интервью|собеседование|напомни/i.test(lower)
+  if (hasEvt && (hasDate || hasTime)) return true
+  if (hasTime && hasDate)             return true
+  return false
+}
+
+function isDiary(t, lower) {
+  if (/^(?:сегодня|вчера)\s+я\s/i.test(t)) return true
+  if (/^(?:сегодня|вчера)\s+я$/i.test(t))  return true
+  if (/^сегодня\s+(?:был[аи]?|ходил[а]?|гулял[а]?|посетил[а]?|поел[а]?|провел[а]?|занимался|занималась)/i.test(t)) return true
+  if (/(?:^|\s)я\s+(?:погулял|погуляла|сходил|сходила|посетил|посетила|побывал|побывала|провел|провела|встретил|встретила|поговорил|поговорила|поел|поела|выспался|выспалась|отдохнул|отдохнула|поработал|поработала|почитал|почитала|посмотрел|посмотрела|написал|написала|сделал|сделала|поиграл|поиграла|потренировался|потренировалась|пробежал|пробежала|поплавал|поплавала|съездил|съездила|побегал|побегала)/i.test(lower)) return true
+  if (/настроение сегодня|чувствую себя|чувствовал|был[а]?\s+продуктивн|хороший день|плохой день|сложный день|тяжёлый день|тяжелый день|неплохой день|день прошёл|день прошел|было здорово|было классно|было грустно|было скучно|скучал|грустил|радовался|радовалась|нервничал/.test(lower)) return true
+  return false
+}
+
+function isNote(t) {
+  return /^(?:идея|заметка|мысль|запиши|записать|нужно запомнить|важно|заметь)[:\s]/i.test(t)
+}
+
+function calTitle(t) {
   return t
-    .replace(/\b\d{1,2}:\d{2}\b/g, '')
-    .replace(/\b\d{1,2}\s+[а-яёА-ЯЁ]{3,}(?:\s+\d{4})?\b/g, '')
-    .replace(/\b(?:сегодня|завтра|послезавтра)\b/gi, '')
-    .replace(/\bв\s+(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье)\b/gi, '')
-    .replace(/\s+/g, ' ').trim() || t.trim()
+    .replace(/\b\d{1,2}:\d{2}\b/g,'')
+    .replace(/в\s+\d{1,2}\s*(?:час[ао]в?|ч)?\s*(?:утра|дня|вечера|ночи)?/gi,'')
+    .replace(/полдень|полночь/gi,'')
+    .replace(/\d{1,2}(?:-?го)?\s+(?:январ[яе]?|феврал[яе]?|март[ае]?|апрел[яе]?|мая?|июн[яе]?|июл[яе]?|август[ае]?|сентябр[яе]?|октябр[яе]?|ноябр[яе]?|декабр[яе]?)(?:\s+\d{4})?/gi,'')
+    .replace(/\b\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?\b/g,'')
+    .replace(/сегодня|завтра|послезавтра|через\s+\S+(?:\s+\S+)?/gi,'')
+    .replace(/(?:в\s+)?(?:следующ[уюий]+\s+)?(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье)/gi,'')
+    .replace(/утром|вечером|днём|днем|ночью/gi,'')
+    .replace(/\s+/g,' ').trim() || t.trim()
 }
 
 function smartParse(text) {
@@ -120,11 +180,10 @@ function smartParse(text) {
   const today = todayKey()
   const now   = new Date()
 
-  // ── 1. Календарь ──────────────────────────────────────────────────────────
   if (isCalendar(t, lower)) {
-    const date  = parseRuDate(t) || today
-    const time  = parseRuTime(t) || ''
-    const title = cleanCalendarTitle(t)
+    const date  = parseDate(t) || today
+    const time  = parseTime(t) || ''
+    const title = calTitle(t)
     return {
       type: 'calendar',
       data: { id:`tg_${Date.now()}`, title, date, time, endTime:'', color:'#5b8dee', allDay:!time, desc:'', location:'', repeat:'none', repeatEnd:'' },
@@ -132,34 +191,33 @@ function smartParse(text) {
     }
   }
 
-  // ── 2. Бюджет ─────────────────────────────────────────────────────────────
-  const moneyMatch = t.match(/(\d[\d\s,.]*)\s*(?:₽|р(?:уб(?:лей|ля|\.)?)?(?:\b|$))/i)
-  if (moneyMatch) {
-    const amount   = parseFloat(moneyMatch[1].replace(/\s/g,'').replace(',','.'))
-    const isIncome = /получил|зарплат|доход|заработал|выплат|пришло|перевод/i.test(lower)
-    const note     = t.replace(moneyMatch[0],'').replace(/^\s*[-—:,]\s*/,'').trim() || t
-    const category = detectCategory(lower)
+  if (isBudget(t, lower)) {
+    const mM = t.match(/(\d[\d\s,.]*)\s*₽/)
+            || lower.match(/(\d[\d\s,.]*)\s*руб/)
+            || lower.match(/(?:потратил[а]?|стоит|заплатил[а]?|оплатил[а]?)\s+(\d[\d\s,.]*)/)
+    const amount   = mM ? parseFloat(mM[1].replace(/\s/g,'').replace(',','.')) : 0
+    const isIncome = /получил[а]?|зарплат|доход|заработал[а]?|выплат|пришло|перевод|аванс|премия|гонорар/.test(lower)
+    const note     = t.replace(/\d[\d\s,.]*\s*(?:₽|руб[а-яё]*)/gi,'').replace(/^\s*[-—:,]\s*/,'').trim() || t
+    const category = budgetCategory(lower)
     return {
       type: 'budget',
       data: { id:`tg_${Date.now()}`, type:isIncome?'income':'expense', amount, category, note, date:today, month:today.slice(0,7), created:now.toISOString() },
-      reply: `💰 *${isIncome?'Доход':'Расход'} ${amount.toLocaleString('ru')} ₽*\nКатегория: ${category}\nЗаметка: ${note}`,
+      reply: `💰 *${isIncome?'Доход':'Расход'} ${amount.toLocaleString('ru')} ₽*\nКатегория: ${category}${note&&note!==t?'\nЗаметка: '+note:''}`,
     }
   }
 
-  // ── 3. Дневник ────────────────────────────────────────────────────────────
   if (isDiary(t, lower)) {
     return {
       type: 'diary',
       data: { id:`tg_${Date.now()}`, date:today, body:t, mood:null, created:now.toISOString(), updated:now.toISOString() },
-      reply: `📖 *Запись в дневник*\n«${t.slice(0,80)}${t.length>80?'…':''}»`,
+      reply: `📖 *Запись в дневник*\n«${t.slice(0,100)}${t.length>100?'…':''}»`,
     }
   }
 
-  // ── 4. Заметка ────────────────────────────────────────────────────────────
-  if (/^(?:идея|заметка|мысль|запиши?|записать)[:\s]/i.test(t)) {
-    const body  = t.replace(/^(?:идея|заметка|мысль|запиши?|записать)[:\s]*/i,'').trim()
+  if (isNote(t)) {
+    const body  = t.replace(/^(?:идея|заметка|мысль|запиши|записать|нужно запомнить|важно|заметь)[:\s]*/i,'').trim()
     const title = body.split('\n')[0].slice(0,60) || 'Без заголовка'
-    const tag   = /идея/i.test(t)?'Идея':/работ/i.test(lower)?'Работа':/учёб|учи/i.test(lower)?'Учёба':'Личное'
+    const tag   = /идея/i.test(t)?'Идея':/работ/.test(lower)?'Работа':/учёб|учи/.test(lower)?'Учёба':'Личное'
     return {
       type: 'note',
       data: { id:`tg_${Date.now()}`, title, body, color:'#1e2433', tag, pinned:false, created:now.toISOString(), updated:now.toISOString() },
@@ -167,141 +225,18 @@ function smartParse(text) {
     }
   }
 
-  // ── 5. Задача ─────────────────────────────────────────────────────────────
-  const tag      = detectTaskTag(lower)
-  const priority = /срочно|важно|критично|asap/i.test(lower) ? 'high' : 'medium'
-  const cleanText = t.replace(/^(?:изучить?|прочитать?|посмотреть?|сделать?|добавить?|напомнить?|купить?)\s+/i,'').replace(/\s+(?:срочно|важно)$/i,'').trim() || t
+  const tag      = taskTag(lower)
+  const priority = /срочно|важно|критично|asap|горит|немедленно/.test(lower) ? 'high' : 'medium'
+  const taskDate = parseDate(t) || today
+  const cleanText = t
+    .replace(/^(?:нужно|надо|необходимо|не забыть|хочу|планирую)\s+/i,'')
+    .replace(/^(?:изучить?|прочитать?|посмотреть?|сделать?|добавить?|напомнить?|купить?|написать?|отправить?|позвонить?)\s+/i,'')
+    .replace(/\s+(?:срочно|важно|сегодня)$/i,'').trim() || t
   return {
     type: 'task',
-    data: { id:`tg_${Date.now()}`, text:cleanText, tag, priority, date:today, done:false, created:now.toISOString(), subtasks:[] },
+    data: { id:`tg_${Date.now()}`, text:cleanText, tag, priority, date:taskDate, done:false, created:now.toISOString(), subtasks:[] },
     reply: `${tagEmoji(tag)} *Задача [${tag}]* добавлена:\n«${cleanText}»`,
   }
-}
-
-// ── Утилиты ──────────────────────────────────────────────────────────────────
-const todayKey = () => new Date().toISOString().slice(0, 10)
-const monthKey = () => new Date().toISOString().slice(0, 7)
-
-// ── Telegram API: прокси только если задан PROXY_URL (локально), на облаке без прокси ──
-const tgAgent = process.env.PROXY_URL ? new HttpsProxyAgent(process.env.PROXY_URL) : undefined
-
-function tgApi(method, params = {}) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(params)
-    const req  = https.request({
-      hostname: 'api.telegram.org',
-      path:     `/bot${TOKEN}/${method}`,
-      method:   'POST',
-      headers:  { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      ...(tgAgent ? { agent: tgAgent } : {}),
-      timeout:  12000,
-    }, res => {
-      const chunks = []
-      res.on('data', c => chunks.push(c))
-      res.on('end', () => {
-        try { resolve(JSON.parse(Buffer.concat(chunks).toString())) }
-        catch (e) { reject(e) }
-      })
-    })
-    req.on('error',   reject)
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
-    req.write(body)
-    req.end()
-  })
-}
-
-async function tgSend(text) {
-  try {
-    await tgApi('sendMessage', { chat_id: CHAT_ID, text, parse_mode: 'Markdown' })
-  } catch (e) {
-    console.log('[tg:send]', e.message)
-  }
-}
-
-// ── Форматтеры ───────────────────────────────────────────────────────────────
-
-function fmtTasks() {
-  const tasks   = store.tasks || []
-  const today   = todayKey()
-  const overdue = tasks.filter(t => !t.done && t.date && t.date < today)
-  const todayT  = tasks.filter(t => !t.done && t.date === today)
-  const noDate  = tasks.filter(t => !t.done && !t.date)
-  if (!overdue.length && !todayT.length && !noDate.length) return '✅ Все задачи выполнены!'
-  const lines = ['📋 *Задачи*']
-  if (overdue.length) {
-    lines.push(`\n🔴 *Просрочено (${overdue.length}):*`)
-    overdue.slice(0, 5).forEach(t => lines.push(`  • ${t.text}  _${t.date}_`))
-    if (overdue.length > 5) lines.push(`  …ещё ${overdue.length - 5}`)
-  }
-  if (todayT.length) {
-    lines.push(`\n📅 *Сегодня (${todayT.length}):*`)
-    todayT.slice(0, 8).forEach(t => lines.push(`  • ${t.text}`))
-    if (todayT.length > 8) lines.push(`  …ещё ${todayT.length - 8}`)
-  }
-  if (noDate.length) {
-    lines.push(`\n📌 *Без даты (${noDate.length}):*`)
-    noDate.slice(0, 5).forEach(t => lines.push(`  • ${t.text}`))
-    if (noDate.length > 5) lines.push(`  …ещё ${noDate.length - 5}`)
-  }
-  return lines.join('\n')
-}
-
-function fmtHabits() {
-  const habits = store.habits_v2 || []
-  const today  = todayKey()
-  if (!habits.length) return '🔁 *Привычки*\n\nНет активных привычек.'
-  let done = 0
-  const rows = habits.map(h => {
-    const ok = (h.log || []).includes(today)
-    if (ok) done++
-    return `${ok ? '✅' : '⬜'} ${h.icon || ''} ${h.name}`.trim()
-  })
-  return ['🔁 *Привычки сегодня*', ...rows, `\n${done}/${habits.length} выполнено`].join('\n')
-}
-
-function fmtFocus() {
-  const stats   = store.focus_stats   || {}
-  const history = store.focus_history || {}
-  const d       = history[todayKey()] || { sessions: 0, minutes: 0 }
-  const totalH  = Math.round((stats.totalMinutes || 0) / 60 * 10) / 10
-  return ['⏱ *Фокус*',
-    `📅 Сегодня: ${d.sessions} сессий, ${d.minutes} мин`,
-    `📊 Всего:   ${stats.sessions || 0} сессий, ${totalH} ч`,
-  ].join('\n')
-}
-
-function fmtBudget() {
-  const txns    = store.budget_txns || []
-  const month   = monthKey()
-  const mt      = txns.filter(t => t.month === month)
-  const income  = mt.filter(t => t.type === 'income') .reduce((s, t) => s + (t.amount || 0), 0)
-  const expense = mt.filter(t => t.type === 'expense').reduce((s, t) => s + (t.amount || 0), 0)
-  const balance = income - expense
-  return [`💰 *Бюджет ${month}*`,
-    `📈 Доходы:  ${income.toLocaleString('ru')} ₽`,
-    `📉 Расходы: ${expense.toLocaleString('ru')} ₽`,
-    `${balance >= 0 ? '✅' : '⚠️'} Баланс:   ${balance.toLocaleString('ru')} ₽`,
-  ].join('\n')
-}
-
-function fmtSummary(prefix = '') {
-  const profile  = store.profile   || {}
-  const tasks    = store.tasks     || []
-  const habits   = store.habits_v2 || []
-  const today    = todayKey()
-  const name     = profile.name || 'Дима'
-  const h        = new Date().getHours()
-  const greeting = h < 12 ? 'Доброе утро' : h < 17 ? 'Добрый день' : 'Добрый вечер'
-  const overdue   = tasks.filter(t => !t.done && t.date && t.date < today).length
-  const todayLeft = tasks.filter(t => !t.done && t.date === today).length
-  const doneToday = tasks.filter(t =>  t.done && (t.updated || t.created || '').slice(0,10) === today).length
-  const habDone   = habits.filter(h => (h.log || []).includes(today)).length
-  const lines = [`${prefix}👋 ${greeting}, ${name}!`]
-  if (overdue   > 0) lines.push(`🔴 Просрочено: ${overdue} задач`)
-  if (todayLeft > 0) lines.push(`📅 На сегодня: ${todayLeft} задач`)
-  if (doneToday > 0) lines.push(`✅ Выполнено:  ${doneToday} задач`)
-  lines.push(`🔁 Привычки: ${habDone}/${habits.length}`)
-  return lines.join('\n')
 }
 
 // ── Применить результат парсинга к store + pendingItems ──────────────────────
