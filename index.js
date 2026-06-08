@@ -182,24 +182,32 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY || ''
 const GROQ_MODEL   = process.env.GROQ_MODEL   || 'llama-3.1-8b-instant'
 const CLASSIFY_TYPES = ['task', 'budget', 'calendar', 'diary', 'note']
 
+// Groq стоит за Cloudflare, который блокирует TLS-отпечаток Node.js (и https,
+// и встроенный fetch получают 403 Forbidden), а curl проходит без проблем —
+// поэтому запрос делаем через дочерний процесс curl (без участия shell, тело
+// передаётся через stdin — инъекция исключена).
+const { spawn: _spawn } = require('child_process')
+
 function groqRequest(body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body)
-    const req  = https.request({
-      hostname: 'api.groq.com',
-      path:     '/openai/v1/chat/completions',
-      method:   'POST',
-      headers:  { 'Content-Type':'application/json', 'Authorization':`Bearer ${GROQ_API_KEY}`, 'Content-Length': Buffer.byteLength(data) },
-      timeout:  15000,
-    }, res => {
-      const chunks = []
-      res.on('data', c => chunks.push(c))
-      res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString())) } catch (e) { reject(e) } })
+    const p = _spawn('curl', [
+      '-s', '-X', 'POST', 'https://api.groq.com/openai/v1/chat/completions',
+      '-H', 'Content-Type: application/json',
+      '-H', `Authorization: Bearer ${GROQ_API_KEY}`,
+      '--max-time', '20',
+      '--data-binary', '@-',
+    ])
+    let out = '', err = ''
+    p.stdout.on('data', c => out += c)
+    p.stderr.on('data', c => err += c)
+    p.on('error', reject)
+    p.on('close', code => {
+      if (code !== 0) return reject(new Error(err.trim() || `curl exit ${code}`))
+      try { resolve(JSON.parse(out)) } catch (e) { reject(e) }
     })
-    req.on('error',   reject)
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')) })
-    req.write(data)
-    req.end()
+    p.stdin.write(data)
+    p.stdin.end()
   })
 }
 
