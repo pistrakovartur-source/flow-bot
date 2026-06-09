@@ -56,10 +56,17 @@ function tgApi(method, params = {}) {
 
 async function tgSend(text) {
   if (!text) return
+  // Пробуем с Markdown, при ошибке парсинга — шлём plain text
   try {
-    await tgApi('sendMessage', { chat_id: CHAT_ID, text, parse_mode: 'Markdown' })
+    const res = await tgApi('sendMessage', { chat_id: CHAT_ID, text, parse_mode: 'Markdown' })
+    if (!res.ok) throw new Error(res.description || 'sendMessage failed')
   } catch (e) {
-    console.log('[tg:send]', e.message)
+    console.log('[tg:send markdown failed]', e.message, '— retrying plain')
+    try {
+      await tgApi('sendMessage', { chat_id: CHAT_ID, text: text.replace(/[*_`]/g, '') })
+    } catch (e2) {
+      console.log('[tg:send plain failed]', e2.message)
+    }
   }
 }
 
@@ -745,7 +752,7 @@ ${text.slice(0, 3000)}
   return {
     type: 'note',
     data,
-    reply: `📝 *Заметка сохранена:* «${analysis.title}»\n\n*Краткое содержание:*\n${analysis.summary}\n\n${analysis.keyPoints?.length ? '*Тезисы:*\n' + analysis.keyPoints.map(p=>`• ${p}`).join('\n') : ''}`,
+    reply: `📝 Заметка сохранена: «${analysis.title}»\n\nКраткое содержание:\n${analysis.summary}\n\n${analysis.keyPoints?.length ? 'Тезисы:\n' + analysis.keyPoints.map(p=>`• ${p}`).join('\n') : ''}`,
   }
 }
 
@@ -859,7 +866,8 @@ async function handleCmd(msg) {
     }
     else await tgSend('❓ Неизвестная команда. Напиши /help')
   } catch (e) {
-    console.log('[bot:cmd]', e.message)
+    console.log('[bot:cmd]', e.message, e.stack)
+    try { await tgApi('sendMessage', { chat_id: CHAT_ID, text: `⚠️ Ошибка обработки: ${e.message}` }) } catch {}
   }
 }
 
