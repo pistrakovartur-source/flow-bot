@@ -1,6 +1,8 @@
 const express              = require('express')
 const https                = require('https')
 const { HttpsProxyAgent }  = require('https-proxy-agent')
+const fs                   = require('fs')
+const path                 = require('path')
 
 const TOKEN        = process.env.BOT_TOKEN    || ''
 const CHAT_ID      = process.env.CHAT_ID      || ''
@@ -13,6 +15,19 @@ if (!TOKEN || !CHAT_ID) {
   console.error('[flow-bot] BOT_TOKEN и CHAT_ID обязательны')
   process.exit(1)
 }
+
+// ── Персистентная очередь pendingItems (переживает рестарты) ─────────────────
+const PENDING_FILE = path.join('/tmp', 'flow_pending.json')
+
+function loadPending() {
+  try { return JSON.parse(fs.readFileSync(PENDING_FILE, 'utf8')) } catch { return [] }
+}
+function savePending(items) {
+  try { fs.writeFileSync(PENDING_FILE, JSON.stringify(items), 'utf8') } catch {}
+}
+
+let pendingItems = loadPending()
+console.log(`[flow-bot] загружено pending: ${pendingItems.length}`)
 
 // ── Telegram API (прямое https, без прокси — Render в облаке) ─────────────────
 function tgApi(method, params = {}) {
@@ -51,8 +66,7 @@ async function tgSend(text) {
 // ── In-memory store (данные синхронизируются из Electron) ────────────────────
 let store = {}
 
-// Очередь элементов, добавленных через бот пока приложение было закрыто
-let pendingItems = []
+// Очередь элементов объявлена выше (loadPending)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // УМНЫЙ ПАРСЕР (bot-server) — без \b для кириллицы
@@ -456,6 +470,7 @@ async function applyParsed(parsed) {
     else store.diary_entries.push(data)
   }
   pendingItems.push({ type, data })
+  savePending(pendingItems)
   await tgSend(reply)
 }
 
@@ -712,6 +727,7 @@ app.post('/sync', (req, res) => {
 app.get('/pending', (req, res) => {
   if (req.headers['x-sync-key'] !== SYNC_KEY) return res.status(401).json({ error: 'Unauthorized' })
   const items = pendingItems.splice(0)
+  savePending(pendingItems)
   console.log(`[flow-bot] /pending → отдано ${items.length} элементов`)
   res.json({ items })
 })
