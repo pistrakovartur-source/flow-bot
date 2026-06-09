@@ -779,21 +779,31 @@ function fmtEndOfDay() {
 
 function extractUrls(msg) {
   const urls = []
+  // Используем text из msg (уже может быть с инлайн-ссылками от inlineTextLinks)
   const text = msg.text || msg.caption || ''
   const entities = msg.entities || msg.caption_entities || []
+
   for (const e of entities) {
     if (e.type === 'url') {
+      // Сырой URL прямо в тексте
       urls.push(text.slice(e.offset, e.offset + e.length))
     } else if (e.type === 'text_link' && e.url) {
+      // Скрытая ссылка за текстом — берём URL из entity
       urls.push(e.url)
+    } else if (e.type === 'bold' || e.type === 'italic') {
+      // Иногда Telegram присылает mention-ссылки через другие типы — игнорируем
     }
   }
-  // Ещё раз regex на случай если entities нет (некоторые клиенты не шлют)
-  const rx = /https?:\/\/[^\s\]\)>«»"']+/g
+
+  // Regex-поиск по тексту — ловит URL которые не попали в entities
+  // (некоторые клиенты не шлют entities для plain-text ссылок)
+  const rx = /https?:\/\/[^\s\]\)>«»"',]+/g
   let m
   while ((m = rx.exec(text)) !== null) {
-    if (!urls.includes(m[0])) urls.push(m[0])
+    const clean = m[0].replace(/[.,;:!?)]+$/, '')
+    if (!urls.includes(clean)) urls.push(clean)
   }
+
   return [...new Set(urls)]
 }
 
@@ -954,37 +964,76 @@ ${text.slice(0, 3000)}
 // Пост: пересланное сообщение, сообщение с URL, длинный текст (>200 символов)
 
 function isPost(msg) {
-  if (msg.forward_from || msg.forward_from_chat || msg.forward_date) return true
+  // Пересланное сообщение (старый и новый API)
+  if (msg.forward_from || msg.forward_from_chat || msg.forward_date || msg.forward_origin) return true
+  // Есть ссылки (явные или скрытые text_link)
   if (extractUrls(msg).length > 0) return true
+  // Есть скрытые ссылки через entities (text_link)
+  const entities = msg.entities || msg.caption_entities || []
+  if (entities.some(e => e.type === 'text_link')) return true
+  // Длинный текст
   const text = msg.text || msg.caption || ''
   if (text.length > 200) return true
   return false
 }
 
+// ── Инлайнит скрытые ссылки (text_link entities) в текст ─────────────────────
+// "Читать статью" → "Читать статью (https://...)"
+// Обрабатывает в обратном порядке, чтобы смещения не съезжали после вставки
+
+function inlineTextLinks(text, entities) {
+  if (!entities || !entities.length) return text
+  const links = entities
+    .filter(e => e.type === 'text_link' && e.url)
+    .sort((a, b) => b.offset - a.offset) // обратный порядок
+  for (const e of links) {
+    const insertPos = e.offset + e.length
+    text = text.slice(0, insertPos) + ` (${e.url})` + text.slice(insertPos)
+  }
+  return text
+}
+
 // Собирает весь контент сообщения (текст + содержимое ссылок) в одну строку
 
 async function collectPostContent(msg) {
-  const text  = msg.text || msg.caption || ''
-  const urls  = extractUrls(msg)
+  const rawText  = msg.text || msg.caption || ''
+  const entities = msg.entities || msg.caption_entities || []
+
+  // Инлайним скрытые ссылки прямо в текст, чтобы они были видны при анализе
+  const text = inlineTextLinks(rawText, entities)
+
+  const urls  = extractUrls({ ...msg, text }) // передаём обновлённый текст
   const parts = []
 
   if (text) parts.push(text)
 
-  // Откуда переслано
-  if (msg.forward_from_chat?.title) {
-    parts.unshift(`[Источник: ${msg.forward_from_chat.title}]`)
-  } else if (msg.forward_from?.first_name) {
-    parts.unshift(`[Источник: ${msg.forward_from.first_name}]`)
+  // Откуда переслано — поддержка и старого (forward_from_chat) и нового (forward_origin) API
+  const fwdTitle =
+    msg.forward_origin?.chat?.title ||          // новый API: channel
+    msg.forward_origin?.sender_user?.first_name || // новый API: user
+    msg.forward_from_chat?.title ||              // старый API
+    msg.forward_from?.first_name ||
+    msg.forward_sender_name ||
+    null
+
+  if (fwdTitle) {
+    parts.unshift(`[Источник: ${fwdTitle}]`)
   }
 
-  // Содержимое каждой ссылки
+  // Содержимое каждой ссылки (до 3 штук)
+  const fetched = []
   for (const url of urls.slice(0, 3)) {
     console.log('[post] загружаю:', url)
     const content = await fetchUrl(url)
     if (content && content.length > 100) {
-      parts.push(`\n---\n[Контент из ${url}]\n${content.slice(0, 4000)}`)
+      fetched.push(`[Контент из ${url}]\n${content.slice(0, 4000)}`)
+    } else {
+      console.log('[post] не удалось загрузить или пустая страница:', url)
+      // Добавляем URL в текст явно, чтобы он точно попал в заметку
+      fetched.push(`[Ссылка: ${url}]`)
     }
   }
+  if (fetched.length) parts.push('\n---\n' + fetched.join('\n\n---\n'))
 
   return parts.join('\n\n').trim()
 }
