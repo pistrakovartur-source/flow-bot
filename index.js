@@ -882,6 +882,14 @@ function ddgSearch(query) {
 }
 
 async function analyzePost(text) {
+  // 0. Извлекаем источники URL из всего собранного контента
+  const _urlRx = /https?:\/\/[^\s\)\]\>"'<]+/g
+  const sourceUrls = [...new Set(
+    [...text.matchAll(_urlRx)]
+      .map(m => m[0].replace(/[.,;:!?)>]+$/, ''))
+      .filter(u => u.length > 12 && !u.includes('api.duckduckgo'))
+  )].slice(0, 5)
+
   // 1. Groq: анализируем пост
   let analysis = null
   try {
@@ -937,8 +945,18 @@ ${text.slice(0, 3000)}
     lines.push(webInfo.slice(0, 800))
     lines.push('')
   }
+  // Секция источников — чистый список URL (всегда есть если пост содержал ссылки)
+  if (sourceUrls.length) {
+    lines.push('## 🔗 Источники')
+    sourceUrls.forEach(u => lines.push(u))
+    lines.push('')
+  }
   lines.push('---')
-  lines.push(`*Источник (оригинал):*\n${text.slice(0, 500)}${text.length > 500 ? '…' : ''}`)
+  // Оригинальный текст (только первые 300 символов — не обрезаем URL выше)
+  const origSnippet = (msg => msg.length > 300 ? msg.slice(0, 300) + '…' : msg)(
+    text.split('\n---\n')[0].trim()  // берём только первую часть до [Контент из ...]
+  )
+  if (origSnippet) lines.push(`*Источник (оригинал):*\n${origSnippet}`)
 
   const body = lines.join('\n')
   const now  = new Date()
@@ -946,11 +964,12 @@ ${text.slice(0, 3000)}
     id: `tg_${Date.now()}`,
     title: analysis.title,
     body,
-    color: '#1e2433',
+    color: 'default',
     tag: analysis.tag || 'Личное',
     pinned: false,
     created: now.toISOString(),
     updated: now.toISOString(),
+    sources: sourceUrls,   // явный массив URL — используется в Notes screen
   }
 
   return {
