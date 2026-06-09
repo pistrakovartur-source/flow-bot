@@ -14,6 +14,40 @@ if (!TOKEN || !CHAT_ID) {
   process.exit(1)
 }
 
+// ── Telegram API (прямое https, без прокси — Render в облаке) ─────────────────
+function tgApi(method, params = {}) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(params)
+    const req  = https.request({
+      hostname: 'api.telegram.org',
+      path:     `/bot${TOKEN}/${method}`,
+      method:   'POST',
+      headers:  { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout:  15000,
+    }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => {
+        try { resolve(JSON.parse(Buffer.concat(chunks).toString())) }
+        catch (e) { reject(e) }
+      })
+    })
+    req.on('error',   reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('tgApi timeout')) })
+    req.write(body)
+    req.end()
+  })
+}
+
+async function tgSend(text) {
+  if (!text) return
+  try {
+    await tgApi('sendMessage', { chat_id: CHAT_ID, text, parse_mode: 'Markdown' })
+  } catch (e) {
+    console.log('[tg:send]', e.message)
+  }
+}
+
 // ── In-memory store (данные синхронизируются из Electron) ────────────────────
 let store = {}
 
