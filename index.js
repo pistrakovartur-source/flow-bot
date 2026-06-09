@@ -70,8 +70,22 @@ async function tgSend(text) {
   }
 }
 
-// ── In-memory store (данные синхронизируются из Electron) ────────────────────
-let store = {}
+// ── Персистентный store (переживает рестарты / редеплои) ─────────────────────
+const STORE_FILE = path.join('/tmp', 'flow_store.json')
+
+function loadStore() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(STORE_FILE, 'utf8'))
+    console.log(`[flow-bot] store загружен: tasks=${(raw.tasks||[]).length}, notes=${(raw.notes||[]).length}, events=${(raw.calendar_events||[]).length}`)
+    return raw
+  } catch { return {} }
+}
+function saveStore() {
+  try { fs.writeFileSync(STORE_FILE, JSON.stringify(store), 'utf8') }
+  catch (e) { console.log('[store:save]', e.message) }
+}
+
+let store = loadStore()
 
 // Очередь элементов объявлена выше (loadPending)
 
@@ -478,6 +492,7 @@ async function applyParsed(parsed) {
   }
   pendingItems.push({ type, data })
   savePending(pendingItems)
+  saveStore()
   await tgSend(reply)
 }
 
@@ -578,6 +593,185 @@ function fmtSummary(prefix = '') {
   if (todayLeft > 0) lines.push(`📅 На сегодня: ${todayLeft} задач`)
   if (doneToday > 0) lines.push(`✅ Выполнено:  ${doneToday} задач`)
   lines.push(`🔁 Привычки: ${habDone}/${habits.length}`)
+  return lines.join('\n')
+}
+
+// ── Умное часовое напоминание ─────────────────────────────────────────────────
+
+function buildHourlyReminder() {
+  const today  = todayKey()
+  const now    = new Date()
+  const hour   = now.getHours()
+  const minute = now.getMinutes()
+  const nowMin = hour * 60 + minute
+
+  const tasks  = store.tasks      || []
+  const events = store.calendar_events || []
+  const habits = store.habits_v2  || []
+
+  // Задачи
+  const overdue   = tasks.filter(t => !t.done && t.date && t.date < today)
+  const todayLeft = tasks.filter(t => !t.done && t.date === today)
+
+  // Ближайшие события сегодня (в течение следующих 2 ч)
+  const upcoming = events.filter(e => {
+    if (e.date !== today || !e.time) return false
+    const [h, m] = e.time.split(':').map(Number)
+    const evMin  = h * 60 + m
+    return evMin > nowMin && evMin <= nowMin + 120
+  })
+  // Все события сегодня (без timed — allDay)
+  const todayEvents = events.filter(e => e.date === today && !e.allDay && e.time)
+
+  // Привычки не выполнены
+  const habitsLeft = habits.filter(h => !(h.log || []).includes(today))
+
+  // Не шлём если совсем нечего
+  if (!overdue.length && !todayLeft.length && !upcoming.length && !habitsLeft.length) return null
+
+  const lines = []
+
+  // Заголовок по времени суток
+  if (hour < 12)      lines.push('☀️ *Напоминание (утро)*')
+  else if (hour < 17) lines.push('🕐 *Напоминание (день)*')
+  else                lines.push('🌆 *Напоминание (вечер)*')
+
+  // Ближайшие события — самое важное
+  if (upcoming.length) {
+    lines.push('')
+    lines.push('⚡ *Скоро:*')
+    upcoming.forEach(e => {
+      const mins = Math.round((e.time.split(':').map(Number).reduce((h,m)=>h*60+m,0)) - nowMin)
+      const label = mins <= 5 ? 'прямо сейчас' : `через ${mins} мин`
+      lines.push(`  📅 ${e.title} — ${e.time} (${label})`)
+    })
+  }
+
+  // Просроченные
+  if (overdue.length) {
+    lines.push('')
+    lines.push(`🔴 *Просрочено (${overdue.length}):*`)
+    overdue.slice(0, 4).forEach(t => lines.push(`  • ${t.text}  _(${t.date})_`))
+    if (overdue.length > 4) lines.push(`  …ещё ${overdue.length - 4}`)
+  }
+
+  // Задачи на сегодня
+  if (todayLeft.length) {
+    lines.push('')
+    lines.push(`📋 *На сегодня (${todayLeft.length}):*`)
+    todayLeft.slice(0, 6).forEach(t => {
+      const prio = t.priority === 'high' ? ' 🔥' : ''
+      lines.push(`  • ${t.text}${prio}`)
+    })
+    if (todayLeft.length > 6) lines.push(`  …ещё ${todayLeft.length - 6}`)
+  }
+
+  // Привычки (только после 17:00)
+  if (habitsLeft.length && hour >= 17) {
+    lines.push('')
+    lines.push(`🔁 *Привычки не выполнены (${habitsLeft.length}):*`)
+    habitsLeft.slice(0, 4).forEach(h => lines.push(`  ⬜ ${h.icon || ''} ${h.name}`.trim()))
+  }
+
+  return lines.join('\n')
+}
+
+// ── Итоги дня (23:00) ─────────────────────────────────────────────────────────
+
+function fmtEndOfDay() {
+  const today  = todayKey()
+  const tasks  = store.tasks        || []
+  const habits = store.habits_v2    || []
+  const txns   = store.budget_txns  || []
+  const diary  = store.diary_entries|| []
+  const events = store.calendar_events || []
+  const profile = store.profile || {}
+  const name   = profile.name || ''
+
+  const doneToday   = tasks.filter(t => t.done && (t.updated||t.created||'').slice(0,10) === today)
+  const remaining   = tasks.filter(t => !t.done && t.date && t.date <= today)
+  const habDone     = habits.filter(h => (h.log||[]).includes(today))
+  const todayEvents = events.filter(e => e.date === today)
+  const todayTxns   = txns.filter(t => t.date === today)
+  const todayDiary  = diary.find(d => d.date === today)
+  const todayExp    = todayTxns.filter(t=>t.type==='expense').reduce((s,t)=>s+(t.amount||0),0)
+  const todayInc    = todayTxns.filter(t=>t.type==='income' ).reduce((s,t)=>s+(t.amount||0),0)
+
+  const lines = ['🌙 *Итоги дня*', `📅 ${today}`, '']
+
+  // Выполненные задачи
+  if (doneToday.length) {
+    lines.push(`✅ *Выполнено задач: ${doneToday.length}*`)
+    doneToday.slice(0,6).forEach(t => lines.push(`  ✓ ${t.text}`))
+    if (doneToday.length > 6) lines.push(`  …ещё ${doneToday.length-6}`)
+    lines.push('')
+  } else {
+    lines.push('📋 Задач не выполнено сегодня')
+    lines.push('')
+  }
+
+  // Незавершённые / просроченные
+  if (remaining.length) {
+    lines.push(`⏳ *Осталось незакрытым: ${remaining.length}*`)
+    remaining.slice(0,4).forEach(t => {
+      const overdue = t.date < today ? ` _(просрочено ${t.date})_` : ''
+      lines.push(`  • ${t.text}${overdue}`)
+    })
+    if (remaining.length > 4) lines.push(`  …ещё ${remaining.length-4}`)
+    lines.push('')
+  }
+
+  // События дня
+  if (todayEvents.length) {
+    lines.push(`📅 *События дня:*`)
+    todayEvents.forEach(e => lines.push(`  • ${e.title}${e.time?' в '+e.time:''}`))
+    lines.push('')
+  }
+
+  // Привычки
+  if (habits.length) {
+    const pct = Math.round(habDone.length / habits.length * 100)
+    const bar = '█'.repeat(Math.round(pct/10)) + '░'.repeat(10-Math.round(pct/10))
+    lines.push(`🔁 *Привычки: ${habDone.length}/${habits.length}* (${pct}%)`)
+    lines.push(`  ${bar}`)
+    habits.forEach(h => {
+      const ok = (h.log||[]).includes(today)
+      lines.push(`  ${ok?'✅':'❌'} ${h.icon||''} ${h.name}`.trim())
+    })
+    lines.push('')
+  }
+
+  // Бюджет за день
+  if (todayTxns.length) {
+    const parts = []
+    if (todayInc) parts.push(`+${todayInc.toLocaleString('ru')} ₽ доход`)
+    if (todayExp) parts.push(`-${todayExp.toLocaleString('ru')} ₽ расход`)
+    lines.push(`💰 *Бюджет за день:* ${parts.join(', ')}`)
+    todayTxns.slice(0,4).forEach(t => {
+      const sign = t.type==='income'?'↑':'↓'
+      lines.push(`  ${sign} ${(t.amount||0).toLocaleString('ru')} ₽ — ${t.category}`)
+    })
+    lines.push('')
+  }
+
+  // Запись в дневник
+  if (todayDiary) {
+    const snippet = todayDiary.body.slice(0,160)
+    lines.push('📔 *Из дневника:*')
+    lines.push(`_"${snippet}${todayDiary.body.length>160?'…':''}"_`)
+    lines.push('')
+  }
+
+  // Итоговое сообщение
+  const phrases = [
+    'Ты молодец — ещё один день позади!',
+    'Хороший день. Отдыхай — завтра новые дела.',
+    'Спокойной ночи! Завтра продолжим.',
+    'День завершён. Заряжайся энергией на завтра! 💪',
+  ]
+  const closing = phrases[new Date().getDate() % phrases.length]
+  lines.push(name ? `👋 ${closing} ${name}` : `👋 ${closing}`)
+
   return lines.join('\n')
 }
 
@@ -910,29 +1104,57 @@ function scheduleDaily(hhmm, callback) {
   setTimeout(() => { callback(); setInterval(callback, 86400000) }, next - now)
 }
 
+// ── Утренняя сводка ───────────────────────────────────────────────────────────
 scheduleDaily(MORNING_TIME, async () => {
   console.log('[flow-bot] утренняя сводка')
   await tgSend(fmtSummary('🌅 *Утренняя сводка*\n\n'))
-  setTimeout(() => tgSend(fmtTasks()), 1500)
+  await new Promise(r => setTimeout(r, 1500))
+  await tgSend(fmtTasks())
 })
 
+// ── Вечерняя сводка ───────────────────────────────────────────────────────────
 scheduleDaily(EVENING_TIME, async () => {
   console.log('[flow-bot] вечерняя сводка')
-  await tgSend(fmtSummary('🌙 *Вечерняя сводка*\n\n'))
+  await tgSend(fmtSummary('🌇 *Вечерняя сводка*\n\n'))
 })
 
-setInterval(async () => {
-  const h = new Date().getHours()
-  if (h < 9 || h > 22) return
-  const tasks  = store.tasks || []
-  const today  = todayKey()
-  const overdue = tasks.filter(t => !t.done && t.date && t.date < today)
-  if (!overdue.length) return
-  const lines = [`⚠️ *Просроченные задачи (${overdue.length}):*`]
-  overdue.slice(0, 5).forEach(t => lines.push(`• ${t.text}  _${t.date}_`))
-  if (overdue.length > 5) lines.push(`…ещё ${overdue.length - 5}`)
-  await tgSend(lines.join('\n'))
-}, 2 * 60 * 60 * 1000)
+// ── Итоги дня в 23:00 ────────────────────────────────────────────────────────
+scheduleDaily('23:00', async () => {
+  console.log('[flow-bot] итоги дня')
+  await tgSend(fmtEndOfDay())
+})
+
+// ── Умный часовой напоминатель (только если есть что сказать) ─────────────────
+// Запускается каждый час ровно в начале часа, работает с 09 до 22
+;(function scheduleHourly() {
+  const now  = new Date()
+  const next = new Date(now)
+  // Следующий :00 (начало следующего часа) + небольшой сдвиг 2 мин чтобы не конфликтовать с scheduleDaily
+  next.setMinutes(2, 0, 0)
+  next.setHours(next.getHours() + 1)
+  const delay = next - now
+  console.log(`[flow-bot] часовой напоминатель → через ${Math.round(delay/60000)} мин`)
+
+  setTimeout(async function tick() {
+    const h = new Date().getHours()
+    // Работаем только с 9 до 22 включительно
+    if (h >= 9 && h <= 22) {
+      try {
+        const msg = buildHourlyReminder()
+        if (msg) {
+          console.log('[flow-bot] часовое напоминание отправлено')
+          await tgSend(msg)
+        } else {
+          console.log('[flow-bot] часовое напоминание пропущено — нечего сообщать')
+        }
+      } catch (e) {
+        console.log('[flow-bot] hourly error:', e.message)
+      }
+    }
+    // Следующий запуск ровно через час
+    setTimeout(tick, 60 * 60 * 1000)
+  }, delay)
+})()
 
 // ── HTTP сервер — синхронизация из Electron ───────────────────────────────────
 
@@ -963,6 +1185,7 @@ app.post('/sync', (req, res) => {
   }
 
   store = { ...store, ...incoming }
+  saveStore()
   console.log(`[flow-bot] sync: tasks=${(store.tasks||[]).length}`)
   res.json({ ok: true })
 })
