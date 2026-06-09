@@ -1421,30 +1421,42 @@ async function routeAlice(utterance) {
 }
 
 // Endpoint для навыка Яндекс Диалогов
-// URL: POST /alice/:token  — токен защищает от посторонних запросов
-app.post('/alice/:token', async (req, res) => {
-  // Проверяем секретный токен в URL
-  if (!ALICE_TOKEN || req.params.token !== ALICE_TOKEN) {
-    console.log('[alice] неверный токен')
-    return res.status(403).json({
-      version: '1.0',
-      response: { text: 'Нет доступа.', end_session: true },
-    })
+// URL: POST /alice  (или /alice?key=TOKEN для защиты)
+// Яндекс требует ВСЕГДА возвращать HTTP 200 — иначе показывает "ошибка 400"
+app.post('/alice', async (req, res) => {
+  // Проверка токена (только если ALICE_TOKEN задан в env)
+  if (ALICE_TOKEN) {
+    const provided = req.query.key || req.headers['x-alice-token'] || ''
+    if (provided !== ALICE_TOKEN) {
+      console.log('[alice] неверный токен, provided:', provided)
+      // Всегда HTTP 200 — Яндекс иначе считает это ошибкой
+      return res.json({
+        version: '1.0',
+        response: { text: 'Нет доступа к навыку.', tts: 'Нет доступа к навыку.', end_session: true },
+      })
+    }
   }
 
   const body      = req.body || {}
   const utterance = (body.request?.original_utterance || '').trim()
-  const isNew     = body.session?.new === true
+  // Очищаем фразу от типовых обращений «алиса включи flow», «запусти flow» и т.п.
+  const clean = utterance
+    .replace(/^алис[аы]\s*/i, '')
+    .replace(/^(включи|запусти|открой|попроси|скажи)\s+(flow\s*\d*|флоу)\s*/i, '')
+    .replace(/^flow\s*\d*\s*/i, '')
+    .trim()
+  const isNew = body.session?.new === true
 
-  console.log(`[alice] utterance="${utterance}" new=${isNew}`)
+  console.log(`[alice] utterance="${utterance}" clean="${clean}" new=${isNew}`)
 
   let text
   try {
-    if (isNew && !utterance) {
-      // Алиса только запустила навык, пользователь ещё ничего не сказал
+    if (isNew && !clean) {
       text = 'Flow включён. Говори команду — добавлю задачу, событие, расход или прочитаю план на сегодня.'
+    } else if (!clean) {
+      text = 'Не расслышала команду. Попробуй ещё раз.'
     } else {
-      text = await routeAlice(utterance)
+      text = await routeAlice(clean)
     }
   } catch (e) {
     console.log('[alice] error:', e.message)
@@ -1456,7 +1468,7 @@ app.post('/alice/:token', async (req, res) => {
     response: {
       text,
       tts:         text,
-      end_session: true,   // завершаем сессию после каждого ответа
+      end_session: true,
     },
   })
 })
