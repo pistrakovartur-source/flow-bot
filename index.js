@@ -636,21 +636,24 @@ async function handleCmd(text) {
 
 let offset = 0
 
-async function pollOnce() {
+async function pollLoop() {
   try {
     const res = await tgApi('getUpdates', { offset, timeout: 0, allowed_updates: ['message'] })
-    if (!res.result?.length) return
-    for (const upd of res.result) {
-      offset = upd.update_id + 1
-      const msg = upd.message
-      if (!msg?.text) continue
-      if (String(msg.chat.id) !== String(CHAT_ID)) continue
-      await handleCmd(msg.text)
+    if (res.result?.length) {
+      for (const upd of res.result) {
+        offset = upd.update_id + 1
+        const msg = upd.message
+        if (!msg?.text) continue
+        if (String(msg.chat.id) !== String(CHAT_ID)) continue
+        await handleCmd(msg.text)
+      }
     }
   } catch {}
+  // Следующий poll только после завершения текущего — исключает дублирование
+  setTimeout(pollLoop, 1000)
 }
 
-setInterval(pollOnce, 2000)
+pollLoop()
 console.log('[flow-bot] polling запущен')
 
 // ── Запланированные уведомления ───────────────────────────────────────────────
