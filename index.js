@@ -7,6 +7,7 @@ const path                 = require('path')
 const TOKEN        = process.env.BOT_TOKEN    || ''
 const CHAT_ID      = process.env.CHAT_ID      || ''
 const SYNC_KEY     = process.env.SYNC_KEY     || 'changeme'
+const ALICE_TOKEN  = process.env.ALICE_TOKEN  || ''   // секрет в URL /alice/:token
 const MORNING_TIME = process.env.MORNING_TIME || '09:00'
 const EVENING_TIME = process.env.EVENING_TIME || '20:00'
 const PORT         = process.env.PORT         || 3001
@@ -1268,5 +1269,196 @@ app.get('/pending', (req, res) => {
 })
 
 app.get('/health', (_req, res) => res.json({ ok: true, ts: new Date().toISOString() }))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ЯНДЕКС АЛИСА — голосовой ввод через Яндекс Станцию / приложение
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Убирает Markdown-символы для голосового произношения
+function aliceText(s) {
+  return (s || '')
+    .replace(/[*_`#]/g, '')
+    .replace(/\n{2,}/g, '. ')
+    .replace(/\n/g, ', ')
+    .replace(/•\s*/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+// Голосовые форматтеры — разговорный стиль без Markdown
+function aliceTasks() {
+  const today   = todayKey()
+  const tasks   = store.tasks || []
+  const overdue = tasks.filter(t => !t.done && t.date && t.date < today)
+  const todayT  = tasks.filter(t => !t.done && t.date === today)
+  const noDate  = tasks.filter(t => !t.done && !t.date)
+
+  if (!overdue.length && !todayT.length && !noDate.length)
+    return 'Все задачи выполнены, отличная работа!'
+
+  const parts = []
+  if (overdue.length) {
+    parts.push(`Просрочено ${overdue.length}: ${overdue.slice(0,3).map(t=>t.text).join(', ')}${overdue.length>3?` и ещё ${overdue.length-3}`:''}`)
+  }
+  if (todayT.length) {
+    parts.push(`На сегодня ${todayT.length}: ${todayT.slice(0,4).map(t=>t.text).join(', ')}${todayT.length>4?` и ещё ${todayT.length-4}`:''}`)
+  }
+  if (noDate.length && !todayT.length) {
+    parts.push(`Без даты ${noDate.length}: ${noDate.slice(0,3).map(t=>t.text).join(', ')}`)
+  }
+  return parts.join('. ')
+}
+
+function aliceCalendar() {
+  const today  = todayKey()
+  const events = store.calendar_events || []
+  const now    = new Date()
+  const todayE = events.filter(e => e.date === today)
+  const upcomingE = events
+    .filter(e => e.date > today)
+    .sort((a,b) => a.date.localeCompare(b.date))
+    .slice(0, 3)
+
+  if (!todayE.length && !upcomingE.length) return 'На сегодня и в ближайшие дни событий нет.'
+
+  const parts = []
+  if (todayE.length) {
+    const list = todayE.map(e => e.title + (e.time ? ` в ${e.time}` : '')).join(', ')
+    parts.push(`Сегодня ${todayE.length > 1 ? todayE.length + ' события' : 'одно событие'}: ${list}`)
+  }
+  if (upcomingE.length) {
+    const list = upcomingE.map(e => `${e.title} ${e.date}${e.time?' в '+e.time:''}`).join(', ')
+    parts.push(`Ближайшие: ${list}`)
+  }
+  return parts.join('. ')
+}
+
+function aliceHabits() {
+  const habits = store.habits_v2 || []
+  const today  = todayKey()
+  if (!habits.length) return 'Привычек пока не добавлено.'
+  const done   = habits.filter(h => (h.log||[]).includes(today))
+  const left   = habits.filter(h => !(h.log||[]).includes(today))
+  const parts  = [`Привычки на сегодня: выполнено ${done.length} из ${habits.length}`]
+  if (left.length) parts.push(`Ещё не выполнено: ${left.map(h=>h.name).join(', ')}`)
+  return parts.join('. ')
+}
+
+function aliceBudget() {
+  const txns   = store.budget_txns || []
+  const month  = new Date().toISOString().slice(0, 7)
+  const mt     = txns.filter(t => t.month === month)
+  const income  = mt.filter(t => t.type==='income') .reduce((s,t)=>s+(t.amount||0),0)
+  const expense = mt.filter(t => t.type==='expense').reduce((s,t)=>s+(t.amount||0),0)
+  const bal     = income - expense
+  const parts   = [`Бюджет за ${month.replace('-','й год, ')}-й месяц`]
+  if (income)  parts.push(`доходы ${income.toLocaleString('ru')} рублей`)
+  if (expense) parts.push(`расходы ${expense.toLocaleString('ru')} рублей`)
+  parts.push(`баланс ${bal >= 0 ? 'плюс' : 'минус'} ${Math.abs(bal).toLocaleString('ru')} рублей`)
+  return parts.join(', ')
+}
+
+function aliceSummary() {
+  const today    = todayKey()
+  const tasks    = store.tasks     || []
+  const habits   = store.habits_v2 || []
+  const profile  = store.profile   || {}
+  const name     = profile.name ? `, ${profile.name}` : ''
+  const overdue  = tasks.filter(t => !t.done && t.date && t.date < today).length
+  const todayL   = tasks.filter(t => !t.done && t.date === today).length
+  const doneT    = tasks.filter(t => t.done && (t.updated||t.created||'').slice(0,10)===today).length
+  const habDone  = habits.filter(h => (h.log||[]).includes(today)).length
+  const parts    = [`Привет${name}!`]
+  if (doneT)   parts.push(`Выполнено задач сегодня: ${doneT}`)
+  if (todayL)  parts.push(`Осталось на сегодня: ${todayL}`)
+  if (overdue) parts.push(`Просрочено: ${overdue}`)
+  parts.push(`Привычки: ${habDone} из ${habits.length}`)
+  return parts.join('. ')
+}
+
+// Роутер: читающие запросы или smartParse для записи
+async function routeAlice(utterance) {
+  const u = (utterance || '').toLowerCase().trim()
+
+  // Читающие команды
+  if (/^(задач[иа]?|что (на )?сегодня|план|дела|список)/.test(u))    return aliceTasks()
+  if (/^(событи[яе]|календар|расписани|встреч)/.test(u))              return aliceCalendar()
+  if (/^(привычк|привычки)/.test(u))                                   return aliceHabits()
+  if (/^(бюджет|расход|трат|деньг|финанс)/.test(u))                   return aliceBudget()
+  if (/^(сводк|итог|как дела|что сделал|резюм|обзор)/.test(u))        return aliceSummary()
+
+  // Запись через smartParse (тот же pipeline что и Telegram)
+  try {
+    const parsed = await smartParse(utterance)
+    // Применяем к store + pendingItems, но БЕЗ отправки в Telegram
+    const { type, data } = parsed
+    if (type === 'task') {
+      if (!store.tasks) store.tasks = []
+      store.tasks.push(data)
+    } else if (type === 'note') {
+      if (!store.notes) store.notes = []
+      store.notes.push(data)
+    } else if (type === 'budget') {
+      if (!store.budget_txns) store.budget_txns = []
+      store.budget_txns.push(data)
+    } else if (type === 'calendar') {
+      if (!store.calendar_events) store.calendar_events = []
+      store.calendar_events.push(data)
+    } else if (type === 'diary') {
+      if (!store.diary_entries) store.diary_entries = []
+      const ex = store.diary_entries.find(e => e.date === data.date)
+      if (ex) { ex.body += '\n\n' + data.body; ex.updated = data.updated }
+      else store.diary_entries.push(data)
+    }
+    pendingItems.push({ type, data })
+    savePending(pendingItems)
+    saveStore()
+    return aliceText(parsed.reply)
+  } catch (e) {
+    console.log('[alice:route]', e.message)
+    return 'Не удалось обработать команду, попробуй ещё раз.'
+  }
+}
+
+// Endpoint для навыка Яндекс Диалогов
+// URL: POST /alice/:token  — токен защищает от посторонних запросов
+app.post('/alice/:token', async (req, res) => {
+  // Проверяем секретный токен в URL
+  if (!ALICE_TOKEN || req.params.token !== ALICE_TOKEN) {
+    console.log('[alice] неверный токен')
+    return res.status(403).json({
+      version: '1.0',
+      response: { text: 'Нет доступа.', end_session: true },
+    })
+  }
+
+  const body      = req.body || {}
+  const utterance = (body.request?.original_utterance || '').trim()
+  const isNew     = body.session?.new === true
+
+  console.log(`[alice] utterance="${utterance}" new=${isNew}`)
+
+  let text
+  try {
+    if (isNew && !utterance) {
+      // Алиса только запустила навык, пользователь ещё ничего не сказал
+      text = 'Flow включён. Говори команду — добавлю задачу, событие, расход или прочитаю план на сегодня.'
+    } else {
+      text = await routeAlice(utterance)
+    }
+  } catch (e) {
+    console.log('[alice] error:', e.message)
+    text = 'Произошла ошибка. Попробуй позже.'
+  }
+
+  res.json({
+    version: '1.0',
+    response: {
+      text,
+      tts:         text,
+      end_session: true,   // завершаем сессию после каждого ответа
+    },
+  })
+})
 
 app.listen(PORT, () => console.log(`[flow-bot] HTTP на порту ${PORT}`))
