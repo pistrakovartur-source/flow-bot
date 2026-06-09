@@ -344,6 +344,18 @@ async function smartParse(text) {
     }
   }
   if (llm?.type === 'task') {
+    // Защита от ошибки LLM: если в тексте есть явные признаки события (ключевое слово + дата/время)
+    // — перекрываем task → calendar, чтобы встречи/записи не попадали в задачи
+    if (isCalendar(t, lower)) {
+      const date  = parseDate(t) || today
+      const time  = parseTime(t) || ''
+      const title = (llm.text || calTitle(t)).trim() || t
+      return {
+        type: 'calendar',
+        data: { id:`tg_${Date.now()}`, title, date, time, endTime:'', color:'#5b8dee', allDay:!time, desc:'', location:'', repeat:'none', repeatEnd:'' },
+        reply: `📅 *Событие добавлено*\n«${title}»\n📆 ${date}${time?' в '+time:''}`,
+      }
+    }
     const cleanText = llm.text || t
     const tag       = llm.tag || taskTag(lower)
     const priority  = llm.priority || (/срочно|важно|критично|asap|горит|немедленно/.test(lower) ? 'high' : 'medium')
