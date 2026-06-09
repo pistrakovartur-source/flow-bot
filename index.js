@@ -574,6 +574,119 @@ function fmtSummary(prefix = '') {
   return lines.join('\n')
 }
 
+// ── Анализ поста: Groq + DuckDuckGo ──────────────────────────────────────────
+
+function ddgSearch(query) {
+  return new Promise(resolve => {
+    const q = encodeURIComponent(query)
+    const req = https.request({
+      hostname: 'api.duckduckgo.com',
+      path: `/?q=${q}&format=json&no_html=1&skip_disambig=1`,
+      method: 'GET',
+      headers: { 'User-Agent': 'flow-bot/1.0' },
+      timeout: 8000,
+    }, res => {
+      let data = ''
+      res.on('data', c => data += c)
+      res.on('end', () => {
+        try {
+          const d = JSON.parse(data)
+          const results = []
+          if (d.AbstractText) results.push(d.AbstractText)
+          if (d.RelatedTopics?.length) {
+            d.RelatedTopics.slice(0, 3).forEach(t => {
+              if (t.Text) results.push(t.Text)
+            })
+          }
+          resolve(results.join('\n\n'))
+        } catch { resolve('') }
+      })
+    })
+    req.on('error', () => resolve(''))
+    req.on('timeout', () => { req.destroy(); resolve('') })
+    req.end()
+  })
+}
+
+async function analyzePost(text) {
+  // 1. Groq: анализируем пост
+  let analysis = null
+  try {
+    const res = await groqRequest({
+      model: GROQ_MODEL,
+      messages: [{
+        role: 'user',
+        content: `Проанализируй следующий текст/пост. Ответь СТРОГО JSON:
+{
+  "title": "краткий заголовок (до 60 символов)",
+  "summary": "краткое изложение в 2-3 предложениях",
+  "keyPoints": ["ключевой тезис 1", "ключевой тезис 2", "ключевой тезис 3"],
+  "topic": "главная тема для поиска в интернете (2-4 слова на русском)",
+  "tag": "Идея|Работа|Учёба|Личное"
+}
+
+Текст:
+"""
+${text.slice(0, 3000)}
+"""`,
+      }],
+      temperature: 0.3,
+      max_tokens: 600,
+      response_format: { type: 'json_object' },
+    })
+    const content = res?.choices?.[0]?.message?.content
+    if (content) analysis = JSON.parse(content)
+  } catch (e) {
+    console.log('[analyze:groq]', e.message)
+  }
+
+  if (!analysis) {
+    // фолбэк без LLM
+    const title = text.split(/[.!?\n]/)[0].slice(0, 60) || 'Пост'
+    analysis = { title, summary: text.slice(0, 200), keyPoints: [], topic: title, tag: 'Личное' }
+  }
+
+  // 2. DuckDuckGo: ищем по теме
+  let webInfo = ''
+  if (analysis.topic) {
+    webInfo = await ddgSearch(analysis.topic)
+  }
+
+  // 3. Собираем заметку
+  const lines = [`# ${analysis.title}`, '', '## 📝 Краткое содержание', analysis.summary, '']
+  if (analysis.keyPoints?.length) {
+    lines.push('## 🔑 Ключевые тезисы')
+    analysis.keyPoints.forEach(p => lines.push(`- ${p}`))
+    lines.push('')
+  }
+  if (webInfo) {
+    lines.push('## 🌐 Из интернета')
+    lines.push(webInfo.slice(0, 800))
+    lines.push('')
+  }
+  lines.push('---')
+  lines.push(`*Источник (оригинал):*\n${text.slice(0, 500)}${text.length > 500 ? '…' : ''}`)
+
+  const body = lines.join('\n')
+  const now  = new Date()
+  const data = {
+    id: `tg_${Date.now()}`,
+    title: analysis.title,
+    body,
+    color: '#1e2433',
+    tag: analysis.tag || 'Личное',
+    pinned: false,
+    created: now.toISOString(),
+    updated: now.toISOString(),
+  }
+
+  return {
+    type: 'note',
+    data,
+    reply: `📝 *Заметка сохранена:* «${analysis.title}»\n\n*Краткое содержание:*\n${analysis.summary}\n\n${analysis.keyPoints?.length ? '*Тезисы:*\n' + analysis.keyPoints.map(p=>`• ${p}`).join('\n') : ''}`,
+  }
+}
+
 // ── Обработка команд ─────────────────────────────────────────────────────────
 
 async function handleCmd(text) {
@@ -587,7 +700,8 @@ async function handleCmd(text) {
     '🔁 /habits  — привычки сегодня\n' +
     '⏱ /focus   — статистика фокуса\n' +
     '💰 /budget  — бюджет месяца\n' +
-    '📊 /summary — сводка дня\n\n' +
+    '📊 /summary — сводка дня\n' +
+    '🔍 /analyze — анализ поста/статьи → заметка с тезисами\n\n' +
     '✨ *Умный ввод* — просто напиши текстом своими словами,\n' +
     'бот сам поймёт, куда это записать:\n' +
     '• `изучить React` → задача [Учёба]\n' +
@@ -623,8 +737,20 @@ async function handleCmd(text) {
       if (!input) { await tgSend('❌ Укажи текст: /add Купить хлеб'); return }
       await applyParsed(await smartParse(input))
     }
+    else if (cmd === '/analyze') {
+      const input = args || ''
+      if (!input) { await tgSend('❌ Пришли текст после команды: /analyze <текст поста>'); return }
+      await tgSend('🔍 Анализирую пост, ищу в интернете…')
+      await applyParsed(await analyzePost(input))
+    }
     else if (!text.startsWith('/')) {
-      await applyParsed(await smartParse(text))
+      // Длинный текст (>200 символов) — автоматически анализируем как пост
+      if (text.length > 200) {
+        await tgSend('🔍 Длинный текст — анализирую как пост…')
+        await applyParsed(await analyzePost(text))
+      } else {
+        await applyParsed(await smartParse(text))
+      }
     }
     else await tgSend('❓ Неизвестная команда. Напиши /help')
   } catch (e) {
