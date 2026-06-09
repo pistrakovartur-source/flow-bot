@@ -574,6 +574,68 @@ function fmtSummary(prefix = '') {
   return lines.join('\n')
 }
 
+// ── Извлечение URL из сообщения Telegram ─────────────────────────────────────
+
+function extractUrls(msg) {
+  const urls = []
+  const text = msg.text || msg.caption || ''
+  const entities = msg.entities || msg.caption_entities || []
+  for (const e of entities) {
+    if (e.type === 'url') {
+      urls.push(text.slice(e.offset, e.offset + e.length))
+    } else if (e.type === 'text_link' && e.url) {
+      urls.push(e.url)
+    }
+  }
+  // Ещё раз regex на случай если entities нет (некоторые клиенты не шлют)
+  const rx = /https?:\/\/[^\s\]\)>«»"']+/g
+  let m
+  while ((m = rx.exec(text)) !== null) {
+    if (!urls.includes(m[0])) urls.push(m[0])
+  }
+  return [...new Set(urls)]
+}
+
+// ── Загрузка страницы по URL и очистка HTML ───────────────────────────────────
+
+function fetchUrl(url) {
+  return new Promise(resolve => {
+    const lib = url.startsWith('https') ? https : require('http')
+    const doReq = (u, redirects = 0) => {
+      if (redirects > 5) return resolve('')
+      try {
+        lib.get(u, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; flow-bot/1.0)' }, timeout: 10000 }, res => {
+          if ([301,302,303,307,308].includes(res.statusCode) && res.headers.location) {
+            return doReq(res.headers.location, redirects + 1)
+          }
+          let raw = ''
+          res.setEncoding('utf8')
+          res.on('data', c => { if (raw.length < 200000) raw += c })
+          res.on('end', () => {
+            // Удаляем script/style целиком
+            let text = raw
+              .replace(/<script[\s\S]*?<\/script>/gi, '')
+              .replace(/<style[\s\S]*?<\/style>/gi, '')
+            // br/p/div/li → переносы
+            text = text.replace(/<br\s*\/?>/gi, '\n')
+              .replace(/<\/?(p|div|li|h[1-6]|tr|blockquote)[^>]*>/gi, '\n')
+            // Убираем остальные теги
+            text = text.replace(/<[^>]+>/g, '')
+            // Декодируем HTML entities
+            text = text.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>')
+              .replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&nbsp;/g,' ')
+              .replace(/&#(\d+);/g,(_,n)=>String.fromCharCode(+n))
+            // Схлопываем пробелы
+            text = text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim()
+            resolve(text.slice(0, 8000))
+          })
+        }).on('error', () => resolve('')).on('timeout', function() { this.destroy(); resolve('') })
+      } catch { resolve('') }
+    }
+    doReq(url)
+  })
+}
+
 // ── Анализ поста: Groq + DuckDuckGo ──────────────────────────────────────────
 
 function ddgSearch(query) {
@@ -687,11 +749,51 @@ ${text.slice(0, 3000)}
   }
 }
 
+// ── Определение — «пост» или нет ──────────────────────────────────────────────
+// Пост: пересланное сообщение, сообщение с URL, длинный текст (>200 символов)
+
+function isPost(msg) {
+  if (msg.forward_from || msg.forward_from_chat || msg.forward_date) return true
+  if (extractUrls(msg).length > 0) return true
+  const text = msg.text || msg.caption || ''
+  if (text.length > 200) return true
+  return false
+}
+
+// Собирает весь контент сообщения (текст + содержимое ссылок) в одну строку
+
+async function collectPostContent(msg) {
+  const text  = msg.text || msg.caption || ''
+  const urls  = extractUrls(msg)
+  const parts = []
+
+  if (text) parts.push(text)
+
+  // Откуда переслано
+  if (msg.forward_from_chat?.title) {
+    parts.unshift(`[Источник: ${msg.forward_from_chat.title}]`)
+  } else if (msg.forward_from?.first_name) {
+    parts.unshift(`[Источник: ${msg.forward_from.first_name}]`)
+  }
+
+  // Содержимое каждой ссылки
+  for (const url of urls.slice(0, 3)) {
+    console.log('[post] загружаю:', url)
+    const content = await fetchUrl(url)
+    if (content && content.length > 100) {
+      parts.push(`\n---\n[Контент из ${url}]\n${content.slice(0, 4000)}`)
+    }
+  }
+
+  return parts.join('\n\n').trim()
+}
+
 // ── Обработка команд ─────────────────────────────────────────────────────────
 
-async function handleCmd(text) {
+async function handleCmd(msg) {
+  const text  = msg.text || msg.caption || ''
   const parts = text.trim().split(/\s+/)
-  const cmd   = parts[0].toLowerCase().split('@')[0]
+  const cmd   = parts[0]?.toLowerCase().split('@')[0] || ''
   const args  = parts.slice(1).join(' ').trim()
 
   const HELP = '👋 *Flow — твой личный планировщик*\n\n' +
@@ -740,14 +842,17 @@ async function handleCmd(text) {
     else if (cmd === '/analyze') {
       const input = args || ''
       if (!input) { await tgSend('❌ Пришли текст после команды: /analyze <текст поста>'); return }
-      await tgSend('🔍 Анализирую пост, ищу в интернете…')
-      await applyParsed(await analyzePost(input))
+      await tgSend('🔍 Анализирую, ищу в интернете…')
+      const content = await collectPostContent({ text: input })
+      await applyParsed(await analyzePost(content))
     }
     else if (!text.startsWith('/')) {
-      // Длинный текст (>200 символов) — автоматически анализируем как пост
-      if (text.length > 200) {
-        await tgSend('🔍 Длинный текст — анализирую как пост…')
-        await applyParsed(await analyzePost(text))
+      if (isPost(msg)) {
+        const urls = extractUrls(msg)
+        const hint = urls.length ? '🔗 Нашёл ссылки — загружаю контент…' : '🔍 Анализирую пост…'
+        await tgSend(hint)
+        const content = await collectPostContent(msg)
+        await applyParsed(await analyzePost(content))
       } else {
         await applyParsed(await smartParse(text))
       }
@@ -769,9 +874,11 @@ async function pollLoop() {
       for (const upd of res.result) {
         offset = upd.update_id + 1
         const msg = upd.message
-        if (!msg?.text) continue
+        if (!msg) continue
         if (String(msg.chat.id) !== String(CHAT_ID)) continue
-        await handleCmd(msg.text)
+        // Принимаем: текстовые сообщения, подписи к медиа, пересланные
+        if (!msg.text && !msg.caption) continue
+        await handleCmd(msg)
       }
     }
   } catch {}
