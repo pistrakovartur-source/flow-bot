@@ -447,6 +447,106 @@ async function applyParsed(parsed) {
   await tgSend(reply)
 }
 
+// ── Утилиты ──────────────────────────────────────────────────────────────────
+
+function todayKey() {
+  const d = new Date()
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`
+}
+
+// ── Форматтеры (читают из in-memory store) ────────────────────────────────────
+
+function fmtTasks() {
+  const tasks   = store.tasks || []
+  const today   = todayKey()
+  const overdue = tasks.filter(t => !t.done && t.date && t.date < today)
+  const todayT  = tasks.filter(t => !t.done && t.date === today)
+  const noDate  = tasks.filter(t => !t.done && !t.date)
+
+  if (!overdue.length && !todayT.length && !noDate.length)
+    return '✅ Все задачи выполнены!'
+
+  const lines = ['📋 *Задачи*']
+  if (overdue.length) {
+    lines.push(`\n🔴 *Просрочено (${overdue.length}):*`)
+    overdue.slice(0, 5).forEach(t => lines.push(`  • ${t.text}  _${t.date}_`))
+    if (overdue.length > 5) lines.push(`  …ещё ${overdue.length - 5}`)
+  }
+  if (todayT.length) {
+    lines.push(`\n📅 *Сегодня (${todayT.length}):*`)
+    todayT.slice(0, 8).forEach(t => lines.push(`  • ${t.text}`))
+    if (todayT.length > 8) lines.push(`  …ещё ${todayT.length - 8}`)
+  }
+  if (noDate.length) {
+    lines.push(`\n📌 *Без даты (${noDate.length}):*`)
+    noDate.slice(0, 5).forEach(t => lines.push(`  • ${t.text}`))
+    if (noDate.length > 5) lines.push(`  …ещё ${noDate.length - 5}`)
+  }
+  return lines.join('\n')
+}
+
+function fmtHabits() {
+  const habits = store.habits_v2 || []
+  const today  = todayKey()
+  if (!habits.length) return '🔁 *Привычки*\n\nНет активных привычек.'
+  let done = 0
+  const rows = habits.map(h => {
+    const ok = (h.log || []).includes(today)
+    if (ok) done++
+    return `${ok ? '✅' : '⬜'} ${h.icon || ''} ${h.name}`.trim()
+  })
+  return ['🔁 *Привычки сегодня*', ...rows, `\n${done}/${habits.length} выполнено`].join('\n')
+}
+
+function fmtFocus() {
+  const stats   = store.focus_stats   || {}
+  const history = store.focus_history || {}
+  const d       = history[todayKey()] || { sessions: 0, minutes: 0 }
+  const totalH  = Math.round((stats.totalMinutes || 0) / 60 * 10) / 10
+  return [
+    '⏱ *Фокус*',
+    `📅 Сегодня: ${d.sessions} сессий, ${d.minutes} мин`,
+    `📊 Всего:   ${stats.sessions || 0} сессий, ${totalH} ч`,
+  ].join('\n')
+}
+
+function fmtBudget() {
+  const txns  = store.budget_txns || []
+  const month = new Date().toISOString().slice(0, 7)
+  const mt    = txns.filter(t => t.month === month)
+  const income  = mt.filter(t => t.type === 'income') .reduce((s, t) => s + (t.amount || 0), 0)
+  const expense = mt.filter(t => t.type === 'expense').reduce((s, t) => s + (t.amount || 0), 0)
+  const balance = income - expense
+  return [
+    `💰 *Бюджет ${month}*`,
+    `📈 Доходы:  ${income.toLocaleString('ru')} ₽`,
+    `📉 Расходы: ${expense.toLocaleString('ru')} ₽`,
+    `${balance >= 0 ? '✅' : '⚠️'} Баланс:   ${balance.toLocaleString('ru')} ₽`,
+  ].join('\n')
+}
+
+function fmtSummary(prefix = '') {
+  const profile  = store.profile    || {}
+  const tasks    = store.tasks      || []
+  const habits   = store.habits_v2  || []
+  const today    = todayKey()
+  const name     = profile.name || 'Дмитрий'
+  const h        = new Date().getHours()
+  const greeting = h < 12 ? 'Доброе утро' : h < 17 ? 'Добрый день' : 'Добрый вечер'
+
+  const overdue   = tasks.filter(t => !t.done && t.date && t.date < today).length
+  const todayLeft = tasks.filter(t => !t.done && t.date === today).length
+  const doneToday = tasks.filter(t => t.done && (t.updated || t.created || '').slice(0, 10) === today).length
+  const habDone   = habits.filter(h => (h.log || []).includes(today)).length
+
+  const lines = [`${prefix}👋 ${greeting}, ${name}!`]
+  if (overdue   > 0) lines.push(`🔴 Просрочено: ${overdue} задач`)
+  if (todayLeft > 0) lines.push(`📅 На сегодня: ${todayLeft} задач`)
+  if (doneToday > 0) lines.push(`✅ Выполнено:  ${doneToday} задач`)
+  lines.push(`🔁 Привычки: ${habDone}/${habits.length}`)
+  return lines.join('\n')
+}
+
 // ── Обработка команд ─────────────────────────────────────────────────────────
 
 async function handleCmd(text) {
